@@ -1,0 +1,237 @@
+import type { Emulator } from '../../emulator';
+
+export function registerString(emu: Emulator): void {
+  const kernel32 = emu.registerDll('KERNEL32.DLL');
+
+  kernel32.register('lstrlenA', 1, () => {
+    const ptr = emu.readArg(0);
+    if (ptr === 0) return 0;
+    let len = 0;
+    while (emu.memory.readU8(ptr + len) !== 0) len++;
+    return len;
+  });
+
+  kernel32.register('lstrcpyA', 2, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    let i = 0;
+    while (true) {
+      const ch = emu.memory.readU8(src + i);
+      emu.memory.writeU8(dst + i, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    return dst;
+  });
+
+  kernel32.register('lstrcmpA', 2, () => {
+    const s1 = emu.readArg(0);
+    const s2 = emu.readArg(1);
+    const str1 = emu.memory.readCString(s1);
+    const str2 = emu.memory.readCString(s2);
+    if (str1 < str2) return -1;
+    if (str1 > str2) return 1;
+    return 0;
+  });
+
+  kernel32.register('lstrcmpiA', 2, () => {
+    const s1 = emu.readArg(0);
+    const s2 = emu.readArg(1);
+    const str1 = emu.memory.readCString(s1).toLowerCase();
+    const str2 = emu.memory.readCString(s2).toLowerCase();
+    if (str1 < str2) return -1;
+    if (str1 > str2) return 1;
+    return 0;
+  });
+
+  kernel32.register('lstrlenW', 1, () => {
+    const ptr = emu.readArg(0);
+    if (ptr === 0) return 0;
+    let len = 0;
+    while (emu.memory.readU16(ptr + len * 2) !== 0) len++;
+    return len;
+  });
+
+  kernel32.register('lstrcpyW', 2, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    let i = 0;
+    while (true) {
+      const ch = emu.memory.readU16(src + i * 2);
+      emu.memory.writeU16(dst + i * 2, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    return dst;
+  });
+
+  kernel32.register('lstrcatA', 2, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    let dstEnd = dst;
+    while (emu.memory.readU8(dstEnd) !== 0) dstEnd++;
+    let i = 0;
+    while (true) {
+      const ch = emu.memory.readU8(src + i);
+      emu.memory.writeU8(dstEnd + i, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    return dst;
+  });
+
+  kernel32.register('lstrcpynA', 3, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    const maxCount = emu.readArg(2);
+    if (maxCount <= 0) return dst;
+    let i = 0;
+    while (i < maxCount - 1) {
+      const ch = emu.memory.readU8(src + i);
+      emu.memory.writeU8(dst + i, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    if (i === maxCount - 1) emu.memory.writeU8(dst + i, 0);
+    return dst;
+  });
+
+  kernel32.register('lstrcatW', 2, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    // Find end of dst
+    let dstEnd = dst;
+    while (emu.memory.readU16(dstEnd) !== 0) dstEnd += 2;
+    // Copy src
+    let i = 0;
+    while (true) {
+      const ch = emu.memory.readU16(src + i * 2);
+      emu.memory.writeU16(dstEnd + i * 2, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    return dst;
+  });
+
+  kernel32.register('lstrcmpiW', 2, () => {
+    const s1 = emu.readArg(0);
+    const s2 = emu.readArg(1);
+    const str1 = emu.memory.readUTF16String(s1).toLowerCase();
+    const str2 = emu.memory.readUTF16String(s2).toLowerCase();
+    if (str1 < str2) return -1;
+    if (str1 > str2) return 1;
+    return 0;
+  });
+
+  kernel32.register('lstrcpynW', 3, () => {
+    const dst = emu.readArg(0);
+    const src = emu.readArg(1);
+    const maxCount = emu.readArg(2);
+    if (maxCount <= 0) return dst;
+    let i = 0;
+    while (i < maxCount - 1) {
+      const ch = emu.memory.readU16(src + i * 2);
+      emu.memory.writeU16(dst + i * 2, ch);
+      if (ch === 0) break;
+      i++;
+    }
+    if (i === maxCount - 1) emu.memory.writeU16(dst + i * 2, 0);
+    return dst;
+  });
+
+  kernel32.register('lstrcmpW', 2, () => {
+    const s1 = emu.readArg(0);
+    const s2 = emu.readArg(1);
+    let i = 0;
+    while (true) {
+      const c1 = emu.memory.readU16(s1 + i * 2);
+      const c2 = emu.memory.readU16(s2 + i * 2);
+      if (c1 !== c2) return c1 < c2 ? -1 : 1;
+      if (c1 === 0) return 0;
+      i++;
+    }
+  });
+
+  kernel32.register('MultiByteToWideChar', 6, () => {
+    const _codePage = emu.readArg(0);
+    const _flags = emu.readArg(1);
+    const srcPtr = emu.readArg(2);
+    let srcLen = emu.readArg(3) | 0;
+    const dstPtr = emu.readArg(4);
+    const dstLen = emu.readArg(5);
+
+    if (srcLen === -1) {
+      srcLen = 0;
+      while (emu.memory.readU8(srcPtr + srcLen) !== 0) srcLen++;
+      srcLen++; // include null
+    }
+
+    if (dstPtr === 0 || dstLen === 0) return srcLen;
+
+    const count = Math.min(srcLen, dstLen);
+    for (let i = 0; i < count; i++) {
+      emu.memory.writeU16(dstPtr + i * 2, emu.memory.readU8(srcPtr + i));
+    }
+    return count;
+  });
+
+  kernel32.register('WideCharToMultiByte', 8, () => {
+    const _codePage = emu.readArg(0);
+    const _flags = emu.readArg(1);
+    const srcPtr = emu.readArg(2);
+    let srcLen = emu.readArg(3) | 0;
+    const dstPtr = emu.readArg(4);
+    const dstLen = emu.readArg(5);
+
+    if (srcLen === -1) {
+      srcLen = 0;
+      while (emu.memory.readU16(srcPtr + srcLen * 2) !== 0) srcLen++;
+      srcLen++; // include null
+    }
+
+    if (dstPtr === 0 || dstLen === 0) return srcLen;
+
+    const count = Math.min(srcLen, dstLen);
+    for (let i = 0; i < count; i++) {
+      emu.memory.writeU8(dstPtr + i, emu.memory.readU16(srcPtr + i * 2) & 0xFF);
+    }
+    return count;
+  });
+
+  kernel32.register('CompareStringA', 6, () => 2); // CSTR_EQUAL
+  kernel32.register('CompareStringW', 6, () => 2);
+
+  // OutputDebugStringA
+  kernel32.register('OutputDebugStringA', 1, () => {
+    const ptr = emu.readArg(0);
+    if (ptr) {
+      const msg = emu.memory.readCString(ptr);
+      console.log('[OutputDebug]', msg);
+    }
+    return 0;
+  });
+
+  kernel32.register('RtlZeroMemory', 2, () => {
+    const dest = emu.readArg(0);
+    const length = emu.readArg(1);
+    for (let i = 0; i < length; i++) {
+      emu.memory.writeU8(dest + i, 0);
+    }
+    return 0;
+  });
+
+  kernel32.register('RtlMoveMemory', 3, () => {
+    const dest = emu.readArg(0);
+    const src = emu.readArg(1);
+    const length = emu.readArg(2);
+    // Use temp buffer to handle overlapping regions
+    const tmp = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+      tmp[i] = emu.memory.readU8(src + i);
+    }
+    for (let i = 0; i < length; i++) {
+      emu.memory.writeU8(dest + i, tmp[i]);
+    }
+    return 0;
+  });
+}

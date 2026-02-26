@@ -1,0 +1,1121 @@
+import type { Emulator } from '../../emulator';
+import { emuCompleteThunk } from '../../emu-exec';
+
+export function registerFile(emu: Emulator): void {
+  const kernel32 = emu.registerDll('KERNEL32.DLL');
+
+  const STD_INPUT_HANDLE = 0xFFFFFFF6;
+  const STD_OUTPUT_HANDLE = 0xFFFFFFF5;
+  const STD_ERROR_HANDLE = 0xFFFFFFF4;
+  const INVALID_HANDLE_VALUE = 0xFFFFFFFF;
+
+  const GENERIC_READ = 0x80000000;
+  const GENERIC_WRITE = 0x40000000;
+  const CREATE_NEW = 1;
+  const CREATE_ALWAYS = 2;
+  const OPEN_EXISTING = 3;
+  const OPEN_ALWAYS = 4;
+  const TRUNCATE_EXISTING = 5;
+
+  const FILE_BEGIN = 0;
+  const FILE_CURRENT = 1;
+  const FILE_END = 2;
+
+  const isConsoleHandle = (h: number) =>
+    h === (STD_INPUT_HANDLE >>> 0) || h === (STD_OUTPUT_HANDLE >>> 0) || h === (STD_ERROR_HANDLE >>> 0);
+
+  const fs = emu.fs;
+
+  function doCreateFile(isWide: boolean): number {
+    const lpFileName = emu.readArg(0);
+    const dwDesiredAccess = emu.readArg(1);
+    const _dwShareMode = emu.readArg(2);
+    const _lpSecurityAttributes = emu.readArg(3);
+    const dwCreationDisposition = emu.readArg(4);
+    const _dwFlagsAndAttributes = emu.readArg(5);
+    const _hTemplateFile = emu.readArg(6);
+
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    const rawPath = isWide ? emu.memory.readUTF16String(lpFileName) : emu.memory.readCString(lpFileName);
+
+    // CONIN$ and CONOUT$ are special console device names
+    const rawUpper = rawPath.toUpperCase();
+    if (rawUpper === 'CONIN$') return STD_INPUT_HANDLE >>> 0;
+    if (rawUpper === 'CONOUT$') return STD_OUTPUT_HANDLE >>> 0;
+
+    const resolved = emu.resolvePath(rawPath);
+    const upper = resolved.toUpperCase();
+
+    console.log(`[CreateFile] path="${rawPath}" resolved="${resolved}" access=0x${dwDesiredAccess.toString(16)} creation=${dwCreationDisposition}`);
+
+    const existing = fs.findFile(resolved, emu.additionalFiles);
+
+    if (dwCreationDisposition === OPEN_EXISTING) {
+      if (!existing) return INVALID_HANDLE_VALUE;
+      let syncData: Uint8Array | null = null;
+      if (existing.source === 'external') {
+        syncData = fs.externalFiles.get(upper)?.data ?? null;
+      } else if (existing.source === 'additional') {
+        const ab = emu.additionalFiles.get(existing.name);
+        if (ab) syncData = new Uint8Array(ab);
+      }
+      const handle = emu.handles.alloc('file', {});
+      fs.openFile(handle, {
+        path: upper,
+        access: dwDesiredAccess,
+        pos: 0,
+        data: syncData,
+        size: existing.size,
+        modified: false,
+      });
+      return handle;
+    }
+
+    if (dwCreationDisposition === OPEN_ALWAYS) {
+      if (existing) {
+        const handle = emu.handles.alloc('file', {});
+        const extData = existing.source === 'external' ? fs.externalFiles.get(upper)?.data ?? null : null;
+        fs.openFile(handle, {
+          path: upper,
+          access: dwDesiredAccess,
+          pos: 0,
+          data: extData,
+          size: existing.size,
+          modified: false,
+        });
+        return handle;
+      }
+      if (upper.startsWith('D:\\')) {
+        const storeName = resolved.substring(3).replace(/\\/g, '/');
+        const handle = emu.handles.alloc('file', {});
+        fs.openFile(handle, {
+          path: upper,
+          access: dwDesiredAccess,
+          pos: 0,
+          data: new Uint8Array(0),
+          size: 0,
+          modified: true,
+        });
+        fs.virtualFiles.push({ name: storeName, size: 0 });
+        return handle;
+      }
+      if (upper.startsWith('Z:\\')) {
+        const baseName = resolved.substring(3);
+        const handle = emu.handles.alloc('file', {});
+        fs.openFile(handle, { path: upper, access: dwDesiredAccess, pos: 0, data: new Uint8Array(0), size: 0, modified: true });
+        fs.externalFiles.set(upper, { data: new Uint8Array(0), name: baseName });
+        return handle;
+      }
+      return INVALID_HANDLE_VALUE;
+    }
+
+    if (dwCreationDisposition === CREATE_ALWAYS || dwCreationDisposition === CREATE_NEW) {
+      if (dwCreationDisposition === CREATE_NEW && existing) return INVALID_HANDLE_VALUE;
+      if (upper.startsWith('D:\\')) {
+        const storeName = resolved.substring(3).replace(/\\/g, '/');
+        const handle = emu.handles.alloc('file', {});
+        fs.openFile(handle, {
+          path: upper,
+          access: dwDesiredAccess,
+          pos: 0,
+          data: new Uint8Array(0),
+          size: 0,
+          modified: true,
+        });
+        if (!existing) {
+          fs.virtualFiles.push({ name: storeName, size: 0 });
+        }
+        return handle;
+      }
+      if (upper.startsWith('Z:\\')) {
+        const baseName = resolved.substring(3);
+        const handle = emu.handles.alloc('file', {});
+        fs.openFile(handle, { path: upper, access: dwDesiredAccess, pos: 0, data: new Uint8Array(0), size: 0, modified: true });
+        fs.externalFiles.set(upper, { data: new Uint8Array(0), name: baseName });
+        return handle;
+      }
+      return INVALID_HANDLE_VALUE;
+    }
+
+    if (dwCreationDisposition === TRUNCATE_EXISTING) {
+      if (!existing) return INVALID_HANDLE_VALUE;
+      const handle = emu.handles.alloc('file', {});
+      fs.openFile(handle, {
+        path: upper,
+        access: dwDesiredAccess,
+        pos: 0,
+        data: new Uint8Array(0),
+        size: 0,
+        modified: true,
+      });
+      return handle;
+    }
+
+    return INVALID_HANDLE_VALUE;
+  }
+
+  kernel32.register('CreateFileA', 7, () => doCreateFile(false));
+  kernel32.register('CreateFileW', 7, () => doCreateFile(true));
+
+  // OpenFile(lpFileName, lpReOpenBuff, uStyle)
+  const OF_EXIST = 0x4000;
+  const HFILE_ERROR = 0xFFFFFFFF;
+  kernel32.register('OpenFile', 3, () => {
+    const lpFileName = emu.readArg(0);
+    const lpReOpenBuff = emu.readArg(1);
+    const uStyle = emu.readArg(2);
+    const fileName = emu.memory.readCString(lpFileName);
+    const resolved = emu.resolvePath(fileName);
+    const upper = resolved.toUpperCase();
+
+    if (lpReOpenBuff) {
+      emu.memory.writeU8(lpReOpenBuff, 136);
+      const pathBytes = new TextEncoder().encode(resolved);
+      for (let i = 0; i < Math.min(pathBytes.length, 127); i++) {
+        emu.memory.writeU8(lpReOpenBuff + 8 + i, pathBytes[i]);
+      }
+      emu.memory.writeU8(lpReOpenBuff + 8 + Math.min(pathBytes.length, 127), 0);
+    }
+
+    const existing = fs.findFile(resolved, emu.additionalFiles);
+
+    if ((uStyle & OF_EXIST) !== 0) {
+      return existing ? 0 : HFILE_ERROR;
+    }
+
+    if (existing) {
+      const handle = emu.handles.alloc('file', {});
+      let fileData: Uint8Array | null = null;
+      if (existing.source === 'additional') {
+        const ab = emu.additionalFiles.get(existing.name);
+        if (ab) fileData = new Uint8Array(ab);
+      }
+      fs.openFile(handle, {
+        path: upper,
+        access: GENERIC_READ,
+        pos: 0,
+        data: fileData,
+        size: existing.size,
+        modified: false,
+      });
+      return handle;
+    }
+
+    return HFILE_ERROR;
+  });
+
+  // _lopen(lpPathName, iReadWrite)
+  kernel32.register('_lopen', 2, () => {
+    const lpPathName = emu.readArg(0);
+    const iReadWrite = emu.readArg(1);
+    const fileName = emu.memory.readCString(lpPathName);
+    const resolved = emu.resolvePath(fileName);
+    const upper = resolved.toUpperCase();
+    const existing = fs.findFile(resolved, emu.additionalFiles);
+    if (!existing) return HFILE_ERROR;
+    const handle = emu.handles.alloc('file', {});
+    let fileData: Uint8Array | null = null;
+    if (existing.source === 'additional') {
+      const ab = emu.additionalFiles.get(existing.name);
+      if (ab) fileData = new Uint8Array(ab);
+    }
+    fs.openFile(handle, {
+      path: upper,
+      access: iReadWrite === 0 ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE,
+      pos: 0,
+      data: fileData,
+      size: existing.size,
+      modified: false,
+    });
+    return handle;
+  });
+
+  // _hread/_lread(hFile, lpBuffer, uBytes)
+  const hreadImpl = () => {
+    const hFile = emu.readArg(0);
+    const lpBuffer = emu.readArg(1);
+    const uBytes = emu.readArg(2);
+    const file = fs.getOpenFile(hFile);
+    if (!file || !file.data) return 0;
+    const avail = Math.max(0, file.data.length - file.pos);
+    const toRead = Math.min(uBytes, avail);
+    for (let i = 0; i < toRead; i++) {
+      emu.memory.writeU8(lpBuffer + i, file.data[file.pos + i]);
+    }
+    file.pos += toRead;
+    return toRead;
+  };
+  kernel32.register('_lread', 3, hreadImpl);
+  kernel32.register('_hread', 3, hreadImpl);
+
+  // _lclose(hFile)
+  kernel32.register('_lclose', 1, () => {
+    const hFile = emu.readArg(0);
+    fs.deleteOpenFile(hFile);
+    emu.handles.free(hFile);
+    return 0;
+  });
+
+  // _llseek(hFile, lOffset, iOrigin)
+  kernel32.register('_llseek', 3, () => {
+    const hFile = emu.readArg(0);
+    const lOffset = emu.readArg(1) | 0;
+    const iOrigin = emu.readArg(2);
+    const file = fs.getOpenFile(hFile);
+    if (!file) return HFILE_ERROR;
+    if (iOrigin === FILE_BEGIN) file.pos = lOffset;
+    else if (iOrigin === FILE_CURRENT) file.pos += lOffset;
+    else if (iOrigin === FILE_END) file.pos = file.size + lOffset;
+    return file.pos;
+  });
+
+  // WinExec(lpCmdLine, uCmdShow)
+  kernel32.register('WinExec', 2, () => 33);
+
+  // ---- ReadFile ----
+  kernel32.register('ReadFile', 5, () => {
+    const hFile = emu.readArg(0);
+    const bufPtr = emu.readArg(1);
+    const nBytes = emu.readArg(2);
+    const bytesReadPtr = emu.readArg(3);
+
+    // Console stdin
+    if (hFile === (STD_INPUT_HANDLE >>> 0)) {
+      if (emu.consoleInputBuffer.length === 0) {
+        emu._pendingReadConsole = { bufPtr, nCharsToRead: nBytes, charsReadPtr: bytesReadPtr };
+        const stackBytes = emu._currentThunkStackBytes;
+        emu.waitingForMessage = true;
+        emu._consoleInputResume = { stackBytes, completer: emuCompleteThunk };
+        return undefined;
+      }
+      let count = 0;
+      while (count < nBytes && emu.consoleInputBuffer.length > 0) {
+        const evt = emu.consoleInputBuffer.shift()!;
+        emu.memory.writeU8(bufPtr + count, evt.char & 0xFF);
+        count++;
+      }
+      if (bytesReadPtr) emu.memory.writeU32(bytesReadPtr, count);
+      return 1;
+    }
+
+    const file = fs.getOpenFile(hFile);
+    if (!file) return 0;
+
+    if (file.data !== null) {
+      const avail = Math.max(0, file.data.length - file.pos);
+      const toRead = Math.min(nBytes, avail);
+      for (let i = 0; i < toRead; i++) {
+        emu.memory.writeU8(bufPtr + i, file.data[file.pos + i]);
+      }
+      file.pos += toRead;
+      if (bytesReadPtr) emu.memory.writeU32(bytesReadPtr, toRead);
+      return 1;
+    }
+
+    // Data not loaded — need async fetch
+    const fileInfo = fs.findFile(file.path, emu.additionalFiles);
+    if (!fileInfo) {
+      if (bytesReadPtr) emu.memory.writeU32(bytesReadPtr, 0);
+      return 1;
+    }
+
+    const stackBytes = emu._currentThunkStackBytes;
+    emu.waitingForMessage = true;
+    fs.fetchFileData(fileInfo, emu.additionalFiles).then(ab => {
+      if (ab) {
+        file.data = new Uint8Array(ab);
+        file.size = file.data.length;
+      } else {
+        file.data = new Uint8Array(0);
+        file.size = 0;
+      }
+      const avail = Math.max(0, file.data.length - file.pos);
+      const toRead = Math.min(nBytes, avail);
+      for (let i = 0; i < toRead; i++) {
+        emu.memory.writeU8(bufPtr + i, file.data[file.pos + i]);
+      }
+      file.pos += toRead;
+      if (bytesReadPtr) emu.memory.writeU32(bytesReadPtr, toRead);
+      emu.waitingForMessage = false;
+      emuCompleteThunk(emu, 1, stackBytes);
+      if (emu.running && !emu.halted) {
+        requestAnimationFrame(emu.tick);
+      }
+    });
+    return undefined;
+  });
+
+  // ---- WriteFile ----
+  kernel32.register('WriteFile', 5, () => {
+    const hFile = emu.readArg(0);
+    const buf = emu.readArg(1);
+    const nBytes = emu.readArg(2);
+    const writtenPtr = emu.readArg(3);
+
+    // Console output
+    if (isConsoleHandle(hFile)) {
+      if (buf && nBytes > 0) {
+        for (let i = 0; i < nBytes; i++) {
+          emu.consoleWriteChar(emu.memory.readU8(buf + i));
+        }
+        emu.onConsoleOutput?.();
+      }
+      if (writtenPtr) emu.memory.writeU32(writtenPtr, nBytes);
+      return 1;
+    }
+
+    const file = fs.getOpenFile(hFile);
+    if (!file) {
+      if (writtenPtr) emu.memory.writeU32(writtenPtr, 0);
+      return 0;
+    }
+
+    if (file.data === null) file.data = new Uint8Array(0);
+
+    const endPos = file.pos + nBytes;
+    if (endPos > file.data.length) {
+      const newBuf = new Uint8Array(endPos);
+      newBuf.set(file.data);
+      file.data = newBuf;
+    }
+
+    for (let i = 0; i < nBytes; i++) {
+      file.data[file.pos + i] = emu.memory.readU8(buf + i);
+    }
+    file.pos += nBytes;
+    file.size = Math.max(file.size, file.pos);
+    file.modified = true;
+
+    if (writtenPtr) emu.memory.writeU32(writtenPtr, nBytes);
+    return 1;
+  });
+
+  // ---- CloseHandle ----
+  kernel32.register('CloseHandle', 1, () => {
+    const handle = emu.readArg(0);
+    if (fs.hasOpenFile(handle)) {
+      fs.closeFile(handle);
+    }
+    return 1;
+  });
+
+  // ---- GetFileType ----
+  kernel32.register('GetFileType', 1, () => {
+    const h = emu.readArg(0);
+    if (isConsoleHandle(h)) return 2; // FILE_TYPE_CHAR
+    if (fs.hasOpenFile(h)) return 1; // FILE_TYPE_DISK
+    return 0; // FILE_TYPE_UNKNOWN
+  });
+
+  kernel32.register('SetHandleCount', 1, () => emu.readArg(0));
+  kernel32.register('FlushFileBuffers', 1, () => 1);
+
+  // ---- SetFilePointer ----
+  kernel32.register('SetFilePointer', 4, () => {
+    const hFile = emu.readArg(0);
+    const lDistanceToMove = emu.readArg(1) | 0;
+    const lpDistanceToMoveHigh = emu.readArg(2);
+    const dwMoveMethod = emu.readArg(3);
+
+    const file = fs.getOpenFile(hFile);
+    if (!file) return INVALID_HANDLE_VALUE;
+
+    let newPos: number;
+    if (dwMoveMethod === FILE_BEGIN) {
+      newPos = lDistanceToMove;
+    } else if (dwMoveMethod === FILE_CURRENT) {
+      newPos = file.pos + lDistanceToMove;
+    } else if (dwMoveMethod === FILE_END) {
+      newPos = file.size + lDistanceToMove;
+    } else {
+      return INVALID_HANDLE_VALUE;
+    }
+
+    if (newPos < 0) newPos = 0;
+    file.pos = newPos;
+    if (lpDistanceToMoveHigh) emu.memory.writeU32(lpDistanceToMoveHigh, 0);
+    return newPos >>> 0;
+  });
+
+  // ---- GetFileSize ----
+  kernel32.register('GetFileSize', 2, () => {
+    const hFile = emu.readArg(0);
+    const lpFileSizeHigh = emu.readArg(1);
+    const file = fs.getOpenFile(hFile);
+    if (!file) return INVALID_HANDLE_VALUE;
+    if (lpFileSizeHigh) emu.memory.writeU32(lpFileSizeHigh, 0);
+    return file.size >>> 0;
+  });
+
+  kernel32.register('SetEndOfFile', 1, () => {
+    const hFile = emu.readArg(0);
+    const file = fs.getOpenFile(hFile);
+    if (!file) return 0;
+    if (file.data === null) file.data = new Uint8Array(0);
+    if (file.pos < file.data.length) {
+      file.data = file.data.slice(0, file.pos);
+    } else if (file.pos > file.data.length) {
+      const newBuf = new Uint8Array(file.pos);
+      newBuf.set(file.data);
+      file.data = newBuf;
+    }
+    file.size = file.pos;
+    file.modified = true;
+    return 1;
+  });
+
+  kernel32.register('GetFileInformationByHandle', 2, () => 0);
+
+  // ---- File mapping ----
+  kernel32.register('CreateFileMappingA', 6, () => {
+    const hFile = emu.readArg(0);
+    const _lpAttributes = emu.readArg(1);
+    const _flProtect = emu.readArg(2);
+    const _dwMaxSizeHigh = emu.readArg(3);
+    const dwMaxSizeLow = emu.readArg(4);
+    const size = dwMaxSizeLow || 0x10000;
+    const addr = emu.allocHeap(size);
+    const file = fs.getOpenFile(hFile);
+    if (file && file.data) {
+      const copyLen = Math.min(file.data.length, size);
+      for (let i = 0; i < copyLen; i++) emu.memory.writeU8(addr + i, file.data[i]);
+    }
+    return emu.handles.alloc('fileMapping', { addr, size });
+  });
+  kernel32.register('CreateFileMappingW', 6, () => {
+    const hFile = emu.readArg(0);
+    const _lpAttributes = emu.readArg(1);
+    const _flProtect = emu.readArg(2);
+    const _dwMaxSizeHigh = emu.readArg(3);
+    const dwMaxSizeLow = emu.readArg(4);
+    const size = dwMaxSizeLow || 0x10000;
+    const addr = emu.allocHeap(size);
+    const file = fs.getOpenFile(hFile);
+    if (file && file.data) {
+      const copyLen = Math.min(file.data.length, size);
+      for (let i = 0; i < copyLen; i++) emu.memory.writeU8(addr + i, file.data[i]);
+    }
+    return emu.handles.alloc('fileMapping', { addr, size });
+  });
+  kernel32.register('MapViewOfFile', 5, () => {
+    const hFileMappingObject = emu.readArg(0);
+    const mapping = emu.handles.get<{ addr: number; size: number }>(hFileMappingObject);
+    if (mapping && mapping.addr) return mapping.addr;
+    return emu.allocHeap(0x10000);
+  });
+  kernel32.register('UnmapViewOfFile', 1, () => 1);
+
+  // ---- Time conversions ----
+  kernel32.register('FileTimeToLocalFileTime', 2, () => {
+    const lpFileTime = emu.readArg(0);
+    const lpLocalFileTime = emu.readArg(1);
+    if (lpFileTime && lpLocalFileTime) {
+      emu.memory.writeU32(lpLocalFileTime, emu.memory.readU32(lpFileTime));
+      emu.memory.writeU32(lpLocalFileTime + 4, emu.memory.readU32(lpFileTime + 4));
+    }
+    return 1;
+  });
+  kernel32.register('FileTimeToDosDateTime', 3, () => 1);
+
+  kernel32.register('LocalFileTimeToFileTime', 2, () => {
+    const lpLocalFileTime = emu.readArg(0);
+    const lpFileTime = emu.readArg(1);
+    if (lpLocalFileTime && lpFileTime) {
+      emu.memory.writeU32(lpFileTime, emu.memory.readU32(lpLocalFileTime));
+      emu.memory.writeU32(lpFileTime + 4, emu.memory.readU32(lpLocalFileTime + 4));
+    }
+    return 1;
+  });
+
+  kernel32.register('FileTimeToSystemTime', 2, () => {
+    const lpFileTime = emu.readArg(0);
+    const lpSystemTime = emu.readArg(1);
+    if (!lpFileTime || !lpSystemTime) return 0;
+    const lo = emu.memory.readU32(lpFileTime);
+    const hi = emu.memory.readU32(lpFileTime + 4);
+    const ft = BigInt(hi) * 0x100000000n + BigInt(lo);
+    const msFromEpoch = Number((ft - 116444736000000000n) / 10000n);
+    const d = new Date(msFromEpoch);
+    emu.memory.writeU16(lpSystemTime + 0, d.getUTCFullYear());
+    emu.memory.writeU16(lpSystemTime + 2, d.getUTCMonth() + 1);
+    emu.memory.writeU16(lpSystemTime + 4, d.getUTCDay());
+    emu.memory.writeU16(lpSystemTime + 6, d.getUTCDate());
+    emu.memory.writeU16(lpSystemTime + 8, d.getUTCHours());
+    emu.memory.writeU16(lpSystemTime + 10, d.getUTCMinutes());
+    emu.memory.writeU16(lpSystemTime + 12, d.getUTCSeconds());
+    emu.memory.writeU16(lpSystemTime + 14, d.getUTCMilliseconds());
+    return 1;
+  });
+
+  kernel32.register('SystemTimeToFileTime', 2, () => {
+    const lpSystemTime = emu.readArg(0);
+    const lpFileTime = emu.readArg(1);
+    if (!lpSystemTime || !lpFileTime) return 0;
+    const y = emu.memory.readU16(lpSystemTime);
+    const m = emu.memory.readU16(lpSystemTime + 2) - 1;
+    const day = emu.memory.readU16(lpSystemTime + 6);
+    const h = emu.memory.readU16(lpSystemTime + 8);
+    const min = emu.memory.readU16(lpSystemTime + 10);
+    const s = emu.memory.readU16(lpSystemTime + 12);
+    const ms = emu.memory.readU16(lpSystemTime + 14);
+    const d = new Date(Date.UTC(y, m, day, h, min, s, ms));
+    const ft = BigInt(d.getTime()) * 10000n + 116444736000000000n;
+    emu.memory.writeU32(lpFileTime, Number(ft & 0xFFFFFFFFn));
+    emu.memory.writeU32(lpFileTime + 4, Number((ft >> 32n) & 0xFFFFFFFFn));
+    return 1;
+  });
+
+  kernel32.register('SetStdHandle', 2, () => 1);
+
+  // ---- FindFirstFile / FindNextFile ----
+  let nextFindHandle = 0x100;
+  const findHandles = new Map<number, { files: { name: string; size: number; isDir: boolean }[]; index: number }>();
+
+  const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+  const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+
+  /** Generate an 8.3 short filename from a long filename */
+  function toShortName(name: string): string {
+    // Strip trailing slash for directories
+    const n = name.endsWith('/') ? name.slice(0, -1) : name;
+    const dot = n.lastIndexOf('.');
+    let base = dot >= 0 ? n.substring(0, dot) : n;
+    let ext = dot >= 0 ? n.substring(dot + 1) : '';
+    base = base.toUpperCase().replace(/[^A-Z0-9_\-]/g, '').substring(0, 8);
+    ext = ext.toUpperCase().replace(/[^A-Z0-9_\-]/g, '').substring(0, 3);
+    if (!base) base = 'FILE';
+    return ext ? `${base}.${ext}` : base;
+  }
+
+  function writeFindDataW(ptr: number, entry: { name: string; size: number; isDir: boolean }): void {
+    for (let i = 0; i < 592; i++) emu.memory.writeU8(ptr + i, 0);
+    emu.memory.writeU32(ptr, entry.isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE);
+    const ft = 0x01BF53EB256D4000n;
+    const ftLow = Number(ft & 0xFFFFFFFFn);
+    const ftHigh = Number((ft >> 32n) & 0xFFFFFFFFn);
+    for (const off of [4, 12, 20]) {
+      emu.memory.writeU32(ptr + off, ftLow);
+      emu.memory.writeU32(ptr + off + 4, ftHigh);
+    }
+    emu.memory.writeU32(ptr + 32, entry.size);
+    // cFileName at offset 44 (WCHAR[260])
+    const nameToWrite = entry.name.substring(0, 259);
+    for (let i = 0; i < nameToWrite.length; i++) {
+      emu.memory.writeU16(ptr + 44 + i * 2, nameToWrite.charCodeAt(i));
+    }
+    // cAlternateFileName at offset 564 (WCHAR[14])
+    const shortName = toShortName(entry.name);
+    for (let i = 0; i < shortName.length && i < 13; i++) {
+      emu.memory.writeU16(ptr + 564 + i * 2, shortName.charCodeAt(i));
+    }
+  }
+
+  function writeFindDataA(ptr: number, entry: { name: string; size: number; isDir: boolean }): void {
+    for (let i = 0; i < 320; i++) emu.memory.writeU8(ptr + i, 0);
+    emu.memory.writeU32(ptr, entry.isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE);
+    const ft = 0x01BF53EB256D4000n;
+    const ftLow = Number(ft & 0xFFFFFFFFn);
+    const ftHigh = Number((ft >> 32n) & 0xFFFFFFFFn);
+    for (const off of [4, 12, 20]) {
+      emu.memory.writeU32(ptr + off, ftLow);
+      emu.memory.writeU32(ptr + off + 4, ftHigh);
+    }
+    emu.memory.writeU32(ptr + 32, entry.size);
+    // cFileName at offset 44 (CHAR[260])
+    const nameToWrite = entry.name.substring(0, 259);
+    for (let i = 0; i < nameToWrite.length; i++) {
+      emu.memory.writeU8(ptr + 44 + i, nameToWrite.charCodeAt(i) & 0xFF);
+    }
+    // cAlternateFileName at offset 304 (CHAR[14])
+    const shortName = toShortName(entry.name);
+    for (let i = 0; i < shortName.length && i < 13; i++) {
+      emu.memory.writeU8(ptr + 304 + i, shortName.charCodeAt(i) & 0xFF);
+    }
+  }
+
+  kernel32.register('FindFirstFileA', 2, () => {
+    const lpFileName = emu.readArg(0);
+    const lpFindData = emu.readArg(1);
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    const pattern = emu.resolvePath(emu.memory.readCString(lpFileName));
+    const files = fs.getVirtualDirListing(pattern, emu.additionalFiles);
+    if (files.length === 0) return INVALID_HANDLE_VALUE;
+    writeFindDataA(lpFindData, files[0]);
+    const handle = nextFindHandle++;
+    findHandles.set(handle, { files, index: 1 });
+    return handle;
+  });
+
+  kernel32.register('FindFirstFileW', 2, () => {
+    const lpFileName = emu.readArg(0);
+    const lpFindData = emu.readArg(1);
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    const pattern = emu.resolvePath(emu.memory.readUTF16String(lpFileName));
+    const files = fs.getVirtualDirListing(pattern, emu.additionalFiles);
+    if (files.length === 0) return INVALID_HANDLE_VALUE;
+    writeFindDataW(lpFindData, files[0]);
+    const handle = nextFindHandle++;
+    findHandles.set(handle, { files, index: 1 });
+    return handle;
+  });
+
+  kernel32.register('FindNextFileA', 2, () => {
+    const hFind = emu.readArg(0);
+    const lpFindData = emu.readArg(1);
+    const state = findHandles.get(hFind);
+    if (!state || state.index >= state.files.length) return 0;
+    writeFindDataA(lpFindData, state.files[state.index]);
+    state.index++;
+    return 1;
+  });
+
+  kernel32.register('FindNextFileW', 2, () => {
+    const hFind = emu.readArg(0);
+    const lpFindData = emu.readArg(1);
+    const state = findHandles.get(hFind);
+    if (!state || state.index >= state.files.length) return 0;
+    writeFindDataW(lpFindData, state.files[state.index]);
+    state.index++;
+    return 1;
+  });
+
+  kernel32.register('FindClose', 1, () => {
+    const hFind = emu.readArg(0);
+    findHandles.delete(hFind);
+    return 1;
+  });
+
+  function doDeleteFile(isWide: boolean): number {
+    const lpFileName = emu.readArg(0);
+    if (!lpFileName) return 0;
+    const rawPath = isWide ? emu.memory.readUTF16String(lpFileName) : emu.memory.readCString(lpFileName);
+    const resolved = emu.resolvePath(rawPath);
+    return fs.deleteFile(resolved) ? 1 : 0;
+  }
+  kernel32.register('DeleteFileA', 1, () => doDeleteFile(false));
+  kernel32.register('DeleteFileW', 1, () => doDeleteFile(true));
+  kernel32.register('GetTempFileNameW', 4, () => 0);
+
+  // ---- Path resolution APIs ----
+  kernel32.register('GetFullPathNameW', 4, () => {
+    const lpFileName = emu.readArg(0);
+    const nBufferLength = emu.readArg(1);
+    const lpBuffer = emu.readArg(2);
+    const lpFilePart = emu.readArg(3);
+    if (!lpFileName) return 0;
+    const name = emu.resolvePath(emu.memory.readUTF16String(lpFileName));
+    if (lpBuffer && nBufferLength > name.length) {
+      emu.memory.writeUTF16String(lpBuffer, name);
+      if (lpFilePart) {
+        const lastSlash = name.lastIndexOf('\\');
+        if (lastSlash >= 0 && lastSlash < name.length - 1) {
+          emu.memory.writeU32(lpFilePart, lpBuffer + (lastSlash + 1) * 2);
+        } else {
+          emu.memory.writeU32(lpFilePart, 0);
+        }
+      }
+    }
+    return name.length;
+  });
+
+  kernel32.register('GetFullPathNameA', 4, () => {
+    const lpFileName = emu.readArg(0);
+    const nBufferLength = emu.readArg(1);
+    const lpBuffer = emu.readArg(2);
+    const lpFilePart = emu.readArg(3);
+    if (!lpFileName) return 0;
+    const name = emu.resolvePath(emu.memory.readCString(lpFileName));
+    if (lpBuffer && nBufferLength > name.length) {
+      emu.memory.writeCString(lpBuffer, name);
+      if (lpFilePart) {
+        const lastSlash = name.lastIndexOf('\\');
+        if (lastSlash >= 0 && lastSlash < name.length - 1) {
+          emu.memory.writeU32(lpFilePart, lpBuffer + lastSlash + 1);
+        } else {
+          emu.memory.writeU32(lpFilePart, 0);
+        }
+      }
+    }
+    return name.length;
+  });
+
+  kernel32.register('GetShortPathNameW', 3, () => {
+    const lpszLong = emu.readArg(0);
+    const lpszShort = emu.readArg(1);
+    const cchBuffer = emu.readArg(2);
+    if (!lpszLong) return 0;
+    let len = 0;
+    while (emu.memory.readU16(lpszLong + len * 2) !== 0) len++;
+    if (lpszShort && cchBuffer > len) {
+      for (let i = 0; i <= len; i++) {
+        emu.memory.writeU16(lpszShort + i * 2, emu.memory.readU16(lpszLong + i * 2));
+      }
+    }
+    return len;
+  });
+
+  kernel32.register('GetShortPathNameA', 3, () => {
+    const longPath = emu.readArg(0);
+    const shortPath = emu.readArg(1);
+    const bufSize = emu.readArg(2);
+    const str = emu.memory.readCString(longPath);
+    if (shortPath && bufSize > str.length) {
+      for (let i = 0; i < str.length; i++) emu.memory.writeU8(shortPath + i, str.charCodeAt(i));
+      emu.memory.writeU8(shortPath + str.length, 0);
+    }
+    return str.length;
+  });
+
+  // ---- Directory APIs ----
+  const writeCString = (ptr: number, str: string, maxLen: number): number => {
+    if (maxLen === 0 || ptr === 0) return str.length + 1;
+    if (str.length + 1 > maxLen) return str.length + 1;
+    for (let i = 0; i < str.length; i++) emu.memory.writeU8(ptr + i, str.charCodeAt(i));
+    emu.memory.writeU8(ptr + str.length, 0);
+    return str.length;
+  };
+
+  kernel32.register('GetTempPathA', 2, () => {
+    const bufSize = emu.readArg(0);
+    const bufPtr = emu.readArg(1);
+    return writeCString(bufPtr, 'C:\\TEMP\\', bufSize);
+  });
+
+  kernel32.register('GetTempPathW', 2, () => {
+    const nBufferLength = emu.readArg(0);
+    const lpBuffer = emu.readArg(1);
+    const path = 'C:\\TEMP\\';
+    if (nBufferLength === 0 || lpBuffer === 0) return path.length;
+    if (nBufferLength > path.length) {
+      for (let i = 0; i < path.length; i++) {
+        emu.memory.writeU16(lpBuffer + i * 2, path.charCodeAt(i));
+      }
+      emu.memory.writeU16(lpBuffer + path.length * 2, 0);
+    }
+    return path.length;
+  });
+
+  kernel32.register('GetSystemDirectoryA', 2, () => {
+    const bufPtr = emu.readArg(0);
+    const bufSize = emu.readArg(1);
+    return writeCString(bufPtr, 'C:\\WINDOWS\\SYSTEM32', bufSize);
+  });
+
+  kernel32.register('GetWindowsDirectoryA', 2, () => {
+    const bufPtr = emu.readArg(0);
+    const bufSize = emu.readArg(1);
+    return writeCString(bufPtr, 'C:\\WINDOWS', bufSize);
+  });
+
+  kernel32.register('GetWindowsDirectoryW', 2, () => {
+    const bufPtr = emu.readArg(0);
+    const bufSize = emu.readArg(1);
+    const path = 'C:\\WINDOWS';
+    if (bufPtr && bufSize > 0) emu.memory.writeUTF16String(bufPtr, path);
+    return path.length;
+  });
+
+  kernel32.register('SearchPathA', 6, () => {
+    const lpPath = emu.readArg(0);
+    const lpFileName = emu.readArg(1);
+    const lpExtension = emu.readArg(2);
+    const nBufferLength = emu.readArg(3);
+    const lpBuffer = emu.readArg(4);
+    const lpFilePart = emu.readArg(5);
+    let fileName = lpFileName ? emu.memory.readCString(lpFileName) : '';
+    const ext = lpExtension ? emu.memory.readCString(lpExtension) : '';
+    if (ext && !fileName.includes('.')) fileName += ext;
+    const lowerName = fileName.toLowerCase();
+    let found = false;
+    for (const vf of fs.virtualFiles) {
+      if (vf.name.toLowerCase() === lowerName) { found = true; break; }
+    }
+    if (!found) {
+      for (const [name] of emu.additionalFiles) {
+        if (name.toLowerCase() === lowerName) { found = true; break; }
+      }
+    }
+    if (!found) return 0;
+    const fullPath = `C:\\WINDOWS\\${fileName}`;
+    const needed = fullPath.length + 1;
+    if (nBufferLength < needed) return needed;
+    if (lpBuffer) {
+      emu.memory.writeCString(lpBuffer, fullPath);
+      if (lpFilePart) {
+        const lastSlash = fullPath.lastIndexOf('\\');
+        emu.memory.writeU32(lpFilePart, lpBuffer + lastSlash + 1);
+      }
+    }
+    return fullPath.length;
+  });
+
+  kernel32.register('SearchPathW', 6, () => {
+    const lpPath = emu.readArg(0);
+    const lpFileName = emu.readArg(1);
+    const lpExtension = emu.readArg(2);
+    const nBufferLength = emu.readArg(3);
+    const lpBuffer = emu.readArg(4);
+    const lpFilePart = emu.readArg(5);
+    let fileName = lpFileName ? emu.memory.readUTF16String(lpFileName) : '';
+    const ext = lpExtension ? emu.memory.readUTF16String(lpExtension) : '';
+    if (ext && !fileName.includes('.')) fileName += ext;
+    const lowerName = fileName.toLowerCase();
+    let found = false;
+    for (const vf of fs.virtualFiles) {
+      if (vf.name.toLowerCase() === lowerName) { found = true; break; }
+    }
+    if (!found) {
+      for (const [name] of emu.additionalFiles) {
+        if (name.toLowerCase() === lowerName) { found = true; break; }
+      }
+    }
+    if (!found) return 0;
+    const fullPath = `C:\\WINDOWS\\${fileName}`;
+    const needed = fullPath.length + 1;
+    if (nBufferLength < needed) return needed;
+    if (lpBuffer) {
+      emu.memory.writeUTF16String(lpBuffer, fullPath);
+      if (lpFilePart) {
+        const lastSlash = fullPath.lastIndexOf('\\');
+        emu.memory.writeU32(lpFilePart, lpBuffer + (lastSlash + 1) * 2);
+      }
+    }
+    return fullPath.length;
+  });
+
+  kernel32.register('GetCurrentDirectoryA', 2, () => {
+    const bufSize = emu.readArg(0);
+    const bufPtr = emu.readArg(1);
+    const path = emu.currentDirs.get(emu.currentDrive) || (emu.currentDrive + ':\\');
+    return writeCString(bufPtr, path, bufSize);
+  });
+
+  kernel32.register('GetCurrentDirectoryW', 2, () => {
+    const bufSize = emu.readArg(0);
+    const bufPtr = emu.readArg(1);
+    const path = emu.currentDirs.get(emu.currentDrive) || (emu.currentDrive + ':\\');
+    if (bufPtr) emu.memory.writeUTF16String(bufPtr, path);
+    return path.length;
+  });
+
+  kernel32.register('SetCurrentDirectoryA', 1, () => {
+    const bufPtr = emu.readArg(0);
+    if (!bufPtr) return 0;
+    return setCurrentDir(emu.memory.readCString(bufPtr));
+  });
+
+  kernel32.register('SetCurrentDirectoryW', 1, () => {
+    const bufPtr = emu.readArg(0);
+    if (!bufPtr) return 0;
+    return setCurrentDir(emu.memory.readUTF16String(bufPtr));
+  });
+
+  function setCurrentDir(path: string): number {
+    let resolved = emu.resolvePath(path);
+    if (resolved.length > 3 && resolved.endsWith('\\')) resolved = resolved.slice(0, -1);
+    const attrs = fs.getFileAttributes(resolved, emu.additionalFiles);
+    if (attrs === INVALID_HANDLE_VALUE) return 0;
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    const drive = resolved[0].toUpperCase();
+    emu.currentDrive = drive;
+    emu.currentDirs.set(drive, resolved);
+    return 1;
+  }
+
+  function doCreateDirectory(isWide: boolean): number {
+    const lpPathName = emu.readArg(0);
+    if (!lpPathName) return 0;
+    const rawPath = isWide ? emu.memory.readUTF16String(lpPathName) : emu.memory.readCString(lpPathName);
+    const resolved = emu.resolvePath(rawPath).toUpperCase();
+    return fs.createDirectory(resolved) ? 1 : 0;
+  }
+  kernel32.register('CreateDirectoryA', 2, () => doCreateDirectory(false));
+  kernel32.register('CreateDirectoryW', 2, () => doCreateDirectory(true));
+
+  function doRemoveDirectory(isWide: boolean): number {
+    const lpPathName = emu.readArg(0);
+    if (!lpPathName) return 0;
+    const rawPath = isWide ? emu.memory.readUTF16String(lpPathName) : emu.memory.readCString(lpPathName);
+    const resolved = emu.resolvePath(rawPath).toUpperCase();
+    return fs.removeDirectory(resolved) ? 1 : 0;
+  }
+  kernel32.register('RemoveDirectoryA', 1, () => doRemoveDirectory(false));
+  kernel32.register('RemoveDirectoryW', 1, () => doRemoveDirectory(true));
+
+  // ---- Drive / disk APIs ----
+  kernel32.register('GetDriveTypeW', 1, () => 3);
+  kernel32.register('GetDriveTypeA', 1, () => 3);
+  kernel32.register('GetLogicalDrives', 0, () => 0x0200000C);
+  kernel32.register('GetFileAttributesExW', 3, () => 0);
+
+  kernel32.register('GetDiskFreeSpaceW', 5, () => {
+    const _lpRootPathName = emu.readArg(0);
+    const lpSectorsPerCluster = emu.readArg(1);
+    const lpBytesPerSector = emu.readArg(2);
+    const lpNumberOfFreeClusters = emu.readArg(3);
+    const lpTotalNumberOfClusters = emu.readArg(4);
+    if (lpSectorsPerCluster) emu.memory.writeU32(lpSectorsPerCluster, 8);
+    if (lpBytesPerSector) emu.memory.writeU32(lpBytesPerSector, 512);
+    if (lpNumberOfFreeClusters) emu.memory.writeU32(lpNumberOfFreeClusters, 262144);
+    if (lpTotalNumberOfClusters) emu.memory.writeU32(lpTotalNumberOfClusters, 2621440);
+    return 1;
+  });
+
+  kernel32.register('GetDiskFreeSpaceA', 5, () => {
+    const _lpRootPathName = emu.readArg(0);
+    const lpSectorsPerCluster = emu.readArg(1);
+    const lpBytesPerSector = emu.readArg(2);
+    const lpNumberOfFreeClusters = emu.readArg(3);
+    const lpTotalNumberOfClusters = emu.readArg(4);
+    if (lpSectorsPerCluster) emu.memory.writeU32(lpSectorsPerCluster, 8);
+    if (lpBytesPerSector) emu.memory.writeU32(lpBytesPerSector, 512);
+    if (lpNumberOfFreeClusters) emu.memory.writeU32(lpNumberOfFreeClusters, 262144);
+    if (lpTotalNumberOfClusters) emu.memory.writeU32(lpTotalNumberOfClusters, 2621440);
+    return 1;
+  });
+
+  kernel32.register('GetDiskFreeSpaceExW', 4, () => {
+    const _lpDir = emu.readArg(0);
+    const lpFreeBytesAvailable = emu.readArg(1);
+    const lpTotalBytes = emu.readArg(2);
+    const lpTotalFreeBytes = emu.readArg(3);
+    if (lpFreeBytesAvailable) { emu.memory.writeU32(lpFreeBytesAvailable, 0x40000000); emu.memory.writeU32(lpFreeBytesAvailable + 4, 0); }
+    if (lpTotalBytes) { emu.memory.writeU32(lpTotalBytes, 0x80000000); emu.memory.writeU32(lpTotalBytes + 4, 2); }
+    if (lpTotalFreeBytes) { emu.memory.writeU32(lpTotalFreeBytes, 0x40000000); emu.memory.writeU32(lpTotalFreeBytes + 4, 0); }
+    return 1;
+  });
+
+  kernel32.register('DeviceIoControl', 8, () => 0);
+
+  kernel32.register('GetVolumeInformationW', 8, () => {
+    const lpRootPathName = emu.readArg(0);
+    const lpVolumeNameBuffer = emu.readArg(1);
+    const nVolumeNameSize = emu.readArg(2);
+    const lpSerialNumber = emu.readArg(3);
+    const lpMaxComponentLength = emu.readArg(4);
+    const lpFileSystemFlags = emu.readArg(5);
+    const lpFileSystemNameBuffer = emu.readArg(6);
+    const nFileSystemNameSize = emu.readArg(7);
+    if (lpVolumeNameBuffer && nVolumeNameSize > 0) emu.memory.writeUTF16String(lpVolumeNameBuffer, 'LOCAL DISK');
+    if (lpSerialNumber) emu.memory.writeU32(lpSerialNumber, 0x1234ABCD);
+    if (lpMaxComponentLength) emu.memory.writeU32(lpMaxComponentLength, 255);
+    if (lpFileSystemFlags) emu.memory.writeU32(lpFileSystemFlags, 0x00000003);
+    if (lpFileSystemNameBuffer && nFileSystemNameSize > 0) emu.memory.writeUTF16String(lpFileSystemNameBuffer, 'NTFS');
+    return 1;
+  });
+
+  // ---- File attributes ----
+  kernel32.register('GetFileAttributesW', 1, () => {
+    const lpFileName = emu.readArg(0);
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    return fs.getFileAttributes(emu.memory.readUTF16String(lpFileName), emu.additionalFiles);
+  });
+
+  kernel32.register('GetFileAttributesA', 1, () => {
+    const lpFileName = emu.readArg(0);
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    return fs.getFileAttributes(emu.memory.readCString(lpFileName), emu.additionalFiles);
+  });
+
+  kernel32.register('SetFileAttributesA', 2, () => 1);
+  kernel32.register('SetFileAttributesW', 2, () => 1);
+  kernel32.register('SetFileTime', 4, () => 1);
+  kernel32.register('GetFileTime', 4, () => 1);
+  kernel32.register('GetTempFileNameA', 4, () => 0);
+
+  // CopyFile: async
+  function doCopyFile(isWide: boolean): number {
+    const lpExisting = emu.readArg(0);
+    const lpNew = emu.readArg(1);
+    const bFailIfExists = emu.readArg(2);
+    if (!lpExisting || !lpNew) return 0;
+
+    const srcPath = isWide ? emu.memory.readUTF16String(lpExisting) : emu.memory.readCString(lpExisting);
+    const dstPath = isWide ? emu.memory.readUTF16String(lpNew) : emu.memory.readCString(lpNew);
+    const resolvedSrc = emu.resolvePath(srcPath);
+    const resolvedDst = emu.resolvePath(dstPath);
+    const dstUpper = resolvedDst.toUpperCase();
+
+    console.log(`[CopyFile] "${srcPath}" -> "${dstPath}"`);
+
+    const srcFile = fs.findFile(resolvedSrc, emu.additionalFiles);
+    if (!srcFile) return 0;
+
+    if (bFailIfExists) {
+      const dstFile = fs.findFile(resolvedDst, emu.additionalFiles);
+      if (dstFile) return 0;
+    }
+
+    if (!dstUpper.startsWith('D:\\')) return 0;
+
+    const stackBytes = emu._currentThunkStackBytes;
+    emu.waitingForMessage = true;
+    fs.fetchFileData(srcFile, emu.additionalFiles).then(ab => {
+      const data = ab ? new Uint8Array(ab) : new Uint8Array(0);
+      const dstStoreName = resolvedDst.substring(3).replace(/\\/g, '/');
+      fs.saveVirtualFile(dstStoreName, data);
+
+      emu.waitingForMessage = false;
+      emuCompleteThunk(emu, 1, stackBytes);
+      if (emu.running && !emu.halted) {
+        requestAnimationFrame(emu.tick);
+      }
+    });
+    return 0;
+  }
+
+  kernel32.register('CopyFileA', 3, () => doCopyFile(false));
+  kernel32.register('CopyFileW', 3, () => doCopyFile(true));
+
+  // MoveFile: copy source to dest, then remove source
+  function doMoveFile(isWide: boolean, hasFlags: boolean): number {
+    const lpExisting = emu.readArg(0);
+    const lpNew = emu.readArg(1);
+    if (!lpExisting || !lpNew) return 0;
+
+    const srcPath = isWide ? emu.memory.readUTF16String(lpExisting) : emu.memory.readCString(lpExisting);
+    const dstPath = isWide ? emu.memory.readUTF16String(lpNew) : emu.memory.readCString(lpNew);
+    const resolvedSrc = emu.resolvePath(srcPath);
+    const resolvedDst = emu.resolvePath(dstPath);
+    const srcUpper = resolvedSrc.toUpperCase();
+    const dstUpper = resolvedDst.toUpperCase();
+
+    console.log(`[MoveFile] "${srcPath}" -> "${dstPath}"`);
+
+    const srcFile = fs.findFile(resolvedSrc, emu.additionalFiles);
+    if (!srcFile) return 0;
+
+    if (!dstUpper.startsWith('D:\\')) return 0;
+
+    const stackBytes = emu._currentThunkStackBytes;
+    emu.waitingForMessage = true;
+    fs.fetchFileData(srcFile, emu.additionalFiles).then(ab => {
+      const data = ab ? new Uint8Array(ab) : new Uint8Array(0);
+      const dstStoreName = resolvedDst.substring(3).replace(/\\/g, '/');
+      fs.saveVirtualFile(dstStoreName, data);
+
+      // Remove source from virtualFiles (if on D:\)
+      if (srcUpper.startsWith('D:\\')) {
+        const srcRelPath = srcUpper.substring(3);
+        fs.removeVirtualFile(srcRelPath, srcFile.name);
+      }
+
+      emu.waitingForMessage = false;
+      emuCompleteThunk(emu, 1, stackBytes);
+      if (emu.running && !emu.halted) {
+        requestAnimationFrame(emu.tick);
+      }
+    });
+    return 0;
+  }
+
+  kernel32.register('MoveFileA', 2, () => doMoveFile(false, false));
+  kernel32.register('MoveFileW', 2, () => doMoveFile(true, false));
+  kernel32.register('MoveFileExA', 3, () => doMoveFile(false, true));
+  kernel32.register('MoveFileExW', 3, () => doMoveFile(true, true));
+
+  kernel32.register('UnlockFile', 5, () => 1);
+  kernel32.register('LockFile', 5, () => 1);
+
+  kernel32.register('OpenFileMappingA', 3, () => 0);
+}

@@ -1,0 +1,1182 @@
+import { Memory } from './memory';
+import { CPU } from './x86/cpu';
+import type { LoadedPE } from './pe-loader';
+import type { LoadedNE } from './ne-loader';
+import { HandleTable } from './win32/handles';
+import type { DCInfo, BitmapInfo, PenInfo, BrushInfo } from './win32/gdi32/index';
+import type { WindowInfo, WndClassInfo } from './win32/user32/index';
+import type { PEInfo } from '../pe/types';
+import type { GL1Context } from './win32/gl-context';
+import type { RegistryStore } from '../registry-store';
+import { DefaultFileManager } from './file-manager';
+import type { FileManager } from './file-manager';
+import { renderChildControls as _renderChildControls, notifyControlOverlays as _notifyControlOverlays } from './emu-render';
+import { getDC as _getDC, getWindowDC as _getWindowDC, promoteToMainWindow as _promoteToMainWindow, setupCanvasSize as _setupCanvasSize, beginPaint as _beginPaint, endPaint as _endPaint, syncDCToCanvas as _syncDCToCanvas, releaseChildDC as _releaseChildDC, dispatchToSehHandler as _dispatchToSehHandler, getBrush as _getBrush, getPen as _getPen, loadBitmapResource as _loadBitmapResource, loadBitmapResourceFromModule as _loadBitmapResourceFromModule, loadBitmapResourceByName as _loadBitmapResourceByName, loadCursorResourceByName as _loadCursorResourceByName, loadStringResource as _loadStringResource, loadIconResource as _loadIconResource } from './emu-window';
+import { emuLoad, emuFindResourceEntry } from './emu-load';
+import { emuTick, emuCallWndProc, emuCallWndProc16, emuCallNative } from './emu-exec';
+import { Thread } from './thread';
+
+export { fillTextBitmap } from './emu-render';
+export { Thread } from './thread';
+export type { FileManager } from './file-manager';
+export { DefaultFileManager } from './file-manager';
+
+export interface WinMsg {
+  hwnd: number;
+  message: number;
+  wParam: number;
+  lParam: number;
+}
+
+export interface DialogControlInfo {
+  id: number;
+  className: string;
+  text: string;
+  style: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type CommonDialogRequest =
+  | { type: 'about'; caption: string; extraInfo: string; otherText: string; onDismiss: () => void };
+
+export interface DialogInfo {
+  title: string;
+  style: number;
+  width: number;
+  height: number;
+  hwnd: number;
+  controls: DialogControlInfo[];
+  overlays: ControlOverlay[];
+  controlValues: Map<number, string>;
+}
+
+export interface ControlOverlay {
+  controlId: number;
+  childHwnd: number;
+  className: string;
+  /** For superclassed controls: the base built-in class (e.g. "EDIT" for Delphi's "TEDIT") */
+  baseClassName?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  style: number;
+  exStyle: number;
+  title: string;
+  checked: number;
+  fontHeight: number;
+  trackPos: number;
+  trackMin: number;
+  trackMax: number;
+  treeItems?: import('./win32/user32/types').TreeViewItem[];
+  treeSelectedItem?: number;
+  treeImageUrls?: (string | undefined)[];
+  lbItems?: string[];
+  lbSelectedIndex?: number;
+  lbSelectedIndices?: number[];
+  cbItems?: string[];
+  cbSelectedIndex?: number;
+  listColumns?: import('./win32/user32/types').ListViewColumn[];
+  listItems?: import('./win32/user32/types').ListViewItem[];
+  statusTexts?: string[];
+  tabItems?: { text: string }[];
+  tabSelectedIndex?: number;
+  bgColor?: string;
+}
+
+// Detect fullwidth characters (CJK, fullwidth forms, etc.) that occupy 2 console columns
+export function isFullwidth(cp: number): boolean {
+  // CJK Radicals Supplement..Enclosed CJK Letters
+  if (cp >= 0x2E80 && cp <= 0x33FF) return true;
+  // CJK Compatibility..CJK Unified Ideographs Extension A
+  if (cp >= 0x3400 && cp <= 0x4DBF) return true;
+  // CJK Unified Ideographs
+  if (cp >= 0x4E00 && cp <= 0x9FFF) return true;
+  // Hangul Syllables
+  if (cp >= 0xAC00 && cp <= 0xD7AF) return true;
+  // CJK Compatibility Ideographs
+  if (cp >= 0xF900 && cp <= 0xFAFF) return true;
+  // Fullwidth Forms (Fullwidth ASCII, Halfwidth Katakana excluded)
+  if (cp >= 0xFF01 && cp <= 0xFF60) return true;
+  if (cp >= 0xFFE0 && cp <= 0xFFE6) return true;
+  // CJK extensions B-F, Compatibility Supplement
+  if (cp >= 0x20000 && cp <= 0x2FA1F) return true;
+  return false;
+}
+
+// Global cascading default position for CW_USEDEFAULT (shared across all instances)
+// Offset matches Windows classic theme: caption height (19) + frame (4) ≈ 23px
+const CASCADE_OFFSET = 23;
+const CASCADE_START_X = 23;
+const CASCADE_START_Y = 23;
+const cascadePos = { x: CASCADE_START_X, y: CASCADE_START_Y };
+
+/** Get next cascading position and advance. Resets when too close to bottom-right. */
+export function getNextCascadePos(screenWidth: number, screenHeight: number): { x: number; y: number } {
+  const { x, y } = cascadePos;
+  // Reset if too close to bottom-right (leave room for at least 200x200 visible area)
+  if (x + 200 > screenWidth || y + 200 > screenHeight) {
+    cascadePos.x = CASCADE_START_X;
+    cascadePos.y = CASCADE_START_Y;
+  } else {
+    cascadePos.x += CASCADE_OFFSET;
+    cascadePos.y += CASCADE_OFFSET;
+  }
+  return { x, y };
+}
+
+export interface ProcessEntry {
+  pid: number;
+  name: string;
+  threadCount: number;
+  basePriority: number;
+  handleCount: number;
+  workingSetSize: number;   // bytes
+  cpuTime: number;          // ms
+}
+
+export interface WindowEntry {
+  hwnd: number;
+  title: string;
+  pid: number;
+  visible: boolean;
+}
+
+export class ProcessRegistry {
+  private nextPid = 100;
+  private entries = new Map<number, ProcessEntry>();
+  private emulators = new Map<number, Emulator>();
+
+  register(emu: Emulator, exeName: string): number {
+    const pid = this.nextPid;
+    this.nextPid += 4; // Windows PIDs are multiples of 4
+    emu.pid = pid;
+    emu.exeName = exeName;
+    if (!emu.exePath) {
+      const name = exeName.replaceAll('/', '\\');
+      if (name.includes('\\')) {
+        emu.exePath = /^[A-Za-z]:/.test(name) ? name : 'D:\\' + name;
+      } else {
+        const cwd = emu.currentDirs.get('D') || 'D:\\';
+        emu.exePath = cwd.endsWith('\\') ? cwd + name : cwd + '\\' + name;
+      }
+    }
+    this.entries.set(pid, {
+      pid,
+      name: exeName,
+      threadCount: 1,
+      basePriority: 8,
+      handleCount: 0,
+      workingSetSize: 0,
+      cpuTime: 0,
+    });
+    this.emulators.set(pid, emu);
+    return pid;
+  }
+
+  unregister(pid: number): void {
+    this.entries.delete(pid);
+    this.emulators.delete(pid);
+  }
+
+  /** Get all processes (entries + live stats from emulators) */
+  getProcessList(): ProcessEntry[] {
+    const result: ProcessEntry[] = [];
+    for (const [pid, entry] of this.entries) {
+      const emu = this.emulators.get(pid);
+      if (emu) {
+        entry.handleCount = emu.handles.size();
+        entry.workingSetSize = (emu.heapPtr - emu.heapBase + emu.virtualPtr - emu.virtualBase) || 0;
+        entry.cpuTime = emu.cpuTimeMs;
+      }
+      result.push(entry);
+    }
+    return result;
+  }
+
+  /** Get all visible top-level windows across all emulators */
+  getWindowList(): WindowEntry[] {
+    const result: WindowEntry[] = [];
+    for (const [pid, emu] of this.emulators) {
+      if (emu.mainWindow) {
+        const wnd = emu.handles.get<WindowInfo>(emu.mainWindow);
+        if (wnd && wnd.title) {
+          result.push({ hwnd: emu.mainWindow, title: wnd.title, pid, visible: wnd.visible !== false });
+        }
+      }
+    }
+    return result;
+  }
+}
+
+export interface WindowsVersion {
+  major: number;
+  minor: number;
+  build: number;
+  platformId: number; // VER_PLATFORM_WIN32_NT = 2
+}
+
+export const WINDOWS_2000: WindowsVersion = { major: 5, minor: 0, build: 2195, platformId: 2 };
+export const WINDOWS_XP: WindowsVersion = { major: 5, minor: 1, build: 2600, platformId: 2 };
+
+export interface ApiDef {
+  handler: (emu: Emulator) => number | undefined;
+  stackBytes: number;    // callee pops this many bytes (0 for cdecl/x64)
+}
+
+export class Win32Dll {
+  constructor(private emu: Emulator, private dll: string) {}
+
+  register(name: string, nArgs: number, handler: (emu: Emulator) => number | undefined): void {
+    const key = `${this.dll}:${name}`;
+    const wrapped = (emu: Emulator) => {
+      console.log(`[API] ${key}`);
+      return handler(emu);
+    };
+    this.emu.apiDefs.set(key, { handler: wrapped, stackBytes: nArgs * 4 });
+  }
+}
+
+export class Win16Module {
+  constructor(private emu: Emulator, private module: string) {}
+
+  register(name: string, stackBytes: number, handler: (emu: Emulator) => number | undefined): void {
+    const key = `${this.module}:${name}`;
+    const wrapped = (emu: Emulator) => {
+      console.log(`[API] ${key}`);
+      return handler(emu);
+    };
+    this.emu.apiDefs.set(key, { handler: wrapped, stackBytes });
+  }
+}
+
+export class Emulator {
+  memory = new Memory();
+  cpu: CPU;
+  handles = new HandleTable();
+  canvas: HTMLCanvasElement | null = null;
+  canvasCtx: CanvasRenderingContext2D | null = null;
+  currentCursor = 0; // handle of current cursor
+  glContext: GL1Context | null = null;
+
+  windowsVersion: WindowsVersion = WINDOWS_2000;
+  registryStore?: RegistryStore;
+
+  pe!: LoadedPE;
+  peInfo!: PEInfo;
+  arrayBuffer!: ArrayBuffer;
+
+  // Console (CUI) mode
+  isConsole = false;
+  consoleBuffer: { char: number; attr: number }[] = [];
+  consoleCursorX = 0;
+  consoleCursorY = 0;
+  consoleAttr = 0x07; // light gray on black
+  consoleTitle = '';
+  consoleMode = 0x0003; // ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT
+  consoleInputMode = 0x0003;
+  consoleInputBuffer: { char: number; vk: number; scan: number }[] = [];
+  onConsoleOutput?: () => void;
+  onConsoleTitleChange?: () => void;
+  _pendingReadConsole: { bufPtr: number; nCharsToRead: number; charsReadPtr: number } | null = null;
+  _pendingReadConsoleInput: { bufPtr: number; nLength: number; eventsReadPtr: number; isWide: boolean } | null = null;
+  _dispatchPaintUsedBeginPaint = false;
+  _pendingGetch = false;
+  _consoleInputResume: { stackBytes: number; completer: (emu: Emulator, retVal: number, stackBytes: number) => void } | null = null;
+  // Line editing state (emulates conhost line editing for ReadConsoleW with ENABLE_LINE_INPUT)
+  _lineEditBuffer: number[] = [];
+  _lineEditCursor = 0;
+  _lineEditStartX = 0;
+  _lineEditStartY = 0;
+  _commandHistory: number[][] = [];
+  _commandHistoryIndex = -1;
+
+  // NE (16-bit) mode
+  isNE = false;
+  ne?: LoadedNE;
+
+  // DOS (MZ) mode
+  isDOS = false;
+  dosKeyBuffer: { ascii: number; scan: number }[] = [];
+  _dosWaitingForKey: false | 'read' | 'peek' = false;
+  _dosKeyConsumedThisTick = false;
+  _dosDTA = 0;
+  _dosPSP = 0;
+  _dosLoadSegment = 0;
+  _dosFiles = new Map<number, { data: Uint8Array; pos: number; name: string }>();
+  _dosNextHandle = 5; // 0-4 are stdin/stdout/stderr/stdaux/stdprn
+  _dosExeData: Uint8Array | null = null; // raw executable bytes for self-open
+  _dosIntVectors = new Map<number, number>();
+  _dosLoLAddr = 0;
+  _dosImageSize = 0;
+  _dosMcbFirstSeg = 0;
+  _dosFindState: { entries: { name: string; size: number; isDir: boolean }[]; index: number; pattern: string } | null = null;
+  _dosFileOpenPending = false;
+  _dosLastTimerTick = 0;
+  _dosHalted = false;
+  /** I/O port data (for IN/OUT instructions) */
+  _ioPorts = new Map<number, number>();
+  /** Pending hardware interrupts to fire at next tick */
+  _pendingHwInts: number[] = [];
+
+  // API dispatch
+  apiDefs = new Map<string, ApiDef>();
+  thunkToApi = new Map<number, { dll: string; name: string; stackBytes: number }>();
+  // Fast page-level filter: set of (addr >>> 12) for all thunk addresses.
+  // If the page isn't in this set, we skip the Map lookup entirely.
+  thunkPages = new Set<number>();
+
+  registerDll(dll: string): Win32Dll { return new Win32Dll(this, dll); }
+  registerModule16(module: string): Win16Module { return new Win16Module(this, module); }
+
+  // Screen dimensions (set by UI to browser viewport size)
+  screenWidth = 800;
+  screenHeight = 600;
+
+
+  // Command line arguments (e.g. "/s" for screensavers)
+  commandLine = '';
+
+  // Additional DLL files available for LoadLibrary (name → ArrayBuffer)
+  additionalFiles = new Map<string, ArrayBuffer>();
+  /** Pluggable virtual file system (D:\, Z:\) */
+  fs: FileManager = new DefaultFileManager();
+  /** Per-process current drive (uppercase letter). Win32 + DOS both use this. */
+  currentDrive = 'D';
+  /** Per-process current directory per drive. Win32 + DOS both use this. */
+  currentDirs = new Map<string, string>([['C', 'C:\\WINDOWS\\SYSTEM32'], ['D', 'D:\\']]);
+  /** Resolve a path using per-process current drive/directory, then delegate to fs. */
+  resolvePath(input: string): string {
+    // Temporarily sync emu→fs so fs.resolvePath uses our per-process state
+    const savedDrive = this.fs.currentDrive;
+    const savedDirs = new Map(this.fs.currentDirs);
+    this.fs.currentDrive = this.currentDrive;
+    this.fs.currentDirs = this.currentDirs;
+    try {
+      return this.fs.resolvePath(input);
+    } finally {
+      this.fs.currentDrive = savedDrive;
+      this.fs.currentDirs = savedDirs;
+    }
+  }
+  /** Size of the loaded exe file (for dir listing) */
+  exeFileSize = 0;
+  /** Environment variable store (uppercase key → value), shared by kernel32 and msvcrt */
+  envVars = new Map<string, string>([
+    ['COMSPEC',                  'C:\\WINDOWS\\SYSTEM32\\CMD.EXE'],
+    ['PATH',                     'C:\\WINDOWS\\SYSTEM32;C:\\WINDOWS;C:\\WINDOWS\\SYSTEM32\\WBEM'],
+    ['PATHEXT',                  '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'],
+    ['SYSTEMROOT',               'C:\\WINDOWS'],
+    ['SYSTEMDRIVE',              'C:'],
+    ['WINDIR',                   'C:\\WINDOWS'],
+    ['TEMP',                     'C:\\WINDOWS\\TEMP'],
+    ['TMP',                      'C:\\WINDOWS\\TEMP'],
+    ['HOMEDRIVE',                'C:'],
+    ['HOMEPATH',                 '\\'],
+    ['USERPROFILE',              'C:\\'],
+    ['USERNAME',                 'User'],
+    ['USERDOMAIN',               'WORKGROUP'],
+    ['COMPUTERNAME',             'MYCOMPUTER'],
+    ['OS',                       'Windows_NT'],
+    ['NUMBER_OF_PROCESSORS',     '1'],
+    ['PROCESSOR_ARCHITECTURE',   'x86'],
+    ['PROCESSOR_IDENTIFIER',     'x86 Family 6 Model 8 Stepping 3, GenuineIntel'],
+    ['PROCESSOR_LEVEL',          '6'],
+    ['PROCESSOR_REVISION',       '0803'],
+    ['PROGRAMFILES',             'C:\\Program Files'],
+    ['COMMONPROGRAMFILES',       'C:\\Program Files\\Common Files'],
+    ['PROMPT',                   '$P$G'],
+  ]);
+  // Loaded DLL modules: dllName → module info
+  loadedModules = new Map<string, { base: number; resourceRva: number; imageBase: number; sizeOfImage?: number }>();
+  // Dynamic thunk allocator (for GetProcAddress on loaded DLLs)
+  dynamicThunkPtr = 0;
+
+  // State
+  running = false;
+  halted = false;
+  _crashFired = false;
+  _wpEscapeLogged = false;
+  haltReason = '';
+  exitedNormally = false;
+  exitCode = 0;
+  stopped = false;
+  _sysmsgTablesAddr = 0;
+  _perfCounter = 0;
+
+  // Threading
+  threads: Thread[] = [];
+  currentThread: Thread | null = null;
+  nextThreadId = 1;
+  // Compatibility getters/setters that delegate to currentThread
+  private _fallbackWaitingForMessage = false;
+  get waitingForMessage(): boolean {
+    return this.currentThread ? this.currentThread.waitingForMessage : this._fallbackWaitingForMessage;
+  }
+  set waitingForMessage(v: boolean) {
+    if (this.currentThread) this.currentThread.waitingForMessage = v;
+    else this._fallbackWaitingForMessage = v;
+  }
+
+  get messageQueue(): WinMsg[] {
+    return this.currentThread ? this.currentThread.messageQueue : this._fallbackMessageQueue;
+  }
+  set messageQueue(v: WinMsg[]) {
+    if (this.currentThread) this.currentThread.messageQueue = v;
+    else this._fallbackMessageQueue = v;
+  }
+  private _fallbackMessageQueue: WinMsg[] = [];
+
+  get _onMessageAvailable(): (() => void) | null {
+    return this.currentThread ? this.currentThread._onMessageAvailable : null;
+  }
+  set _onMessageAvailable(v: (() => void) | null) {
+    if (this.currentThread) this.currentThread._onMessageAvailable = v;
+  }
+
+  get wndProcDepth(): number {
+    return this.currentThread ? this.currentThread.wndProcDepth : 0;
+  }
+  set wndProcDepth(v: number) {
+    if (this.currentThread) this.currentThread.wndProcDepth = v;
+  }
+
+  get wndProcResult(): number {
+    return this.currentThread ? this.currentThread.wndProcResult : 0;
+  }
+  set wndProcResult(v: number) {
+    if (this.currentThread) this.currentThread.wndProcResult = v;
+  }
+
+  get _currentThunkStackBytes(): number {
+    return this.currentThread ? this.currentThread._currentThunkStackBytes : 0;
+  }
+  set _currentThunkStackBytes(v: number) {
+    if (this.currentThread) this.currentThread._currentThunkStackBytes = v;
+  }
+
+  get _wndProcSetupPending(): boolean {
+    return this.currentThread ? this.currentThread._wndProcSetupPending : false;
+  }
+  set _wndProcSetupPending(v: boolean) {
+    if (this.currentThread) this.currentThread._wndProcSetupPending = v;
+  }
+
+  get _wndProcFrames(): Array<{
+    savedEBX: number; savedEBP: number; savedESI: number; savedEDI: number;
+    savedDS?: number; savedSP?: number;
+    outerStackBytes: number;
+    outerCompleter: (emu: Emulator, retVal: number, stackBytes: number) => void;
+  }> {
+    return this.currentThread ? this.currentThread._wndProcFrames : [];
+  }
+  set _wndProcFrames(v: Array<{
+    savedEBX: number; savedEBP: number; savedESI: number; savedEDI: number;
+    savedDS?: number; savedSP?: number;
+    outerStackBytes: number;
+    outerCompleter: (emu: Emulator, retVal: number, stackBytes: number) => void;
+  }>) {
+    if (this.currentThread) this.currentThread._wndProcFrames = v;
+  }
+
+  // Window system
+  mainWindow = 0;
+  capturedWindow = 0;
+  // GL sync-yield guard: avoid double-yield when apps call both glFinish and SwapBuffers per frame.
+  glSyncYieldedThisFrame = false;
+  glSyncAwaitingSwap = false;
+  keyStates = new Set<number>(); // Currently pressed virtual key codes
+  windowDCs = new Map<number, number>();
+  private timers = new Map<string, number>();
+
+  // CBT hooks (WH_CBT = 5)
+  cbtHooks: { lpfn: number; hMod: number }[] = [];
+
+  // Window class registry
+  windowClasses = new Map<string, WndClassInfo>();
+  atomToClassName = new Map<number, string>();
+  nextClassAtom = 0xC001;
+
+  // GDI helpers set by registerGdi32
+  getStockBrush!: (idx: number) => BrushInfo | null;
+  getStockPen!: (idx: number) => PenInfo | null;
+
+  // Dedup set for GetProcAddress "Not found" warnings
+  _gpaNotFound?: Set<string>;
+
+  // Heap allocator
+  heapBase = 0;
+  heapPtr = 0;
+  heapAllocSizes = new Map<number, number>();
+
+  // NE local heap (within data segment)
+  localHeapBase = 0;  // linear address of local heap start
+  localHeapPtr = 0;   // current allocation pointer
+  localHeapEnd = 0;   // linear address of local heap end
+
+  // Virtual allocator
+  virtualBase = 0;
+  virtualPtr = 0;
+
+  // WndProc call stack (wndProcResult, wndProcDepth, _currentThunkStackBytes,
+  // _wndProcSetupPending, _wndProcFrames are now getter/setters delegating to currentThread)
+  _tickCount = 0;
+  _lastThunkTick = 0;
+  /** Cumulative x86 instruction count (thunks weighted ~1000 each) */
+  cpuSteps = 0;
+  /** Cumulative CPU time in ms (derived from cpuSteps assuming ~500MHz effective clock) */
+  get cpuTimeMs(): number { return this.cpuSteps * 0.000002 * 1000; }
+
+  // SEH dispatch state
+  _sehState: {
+    excRecAddr: number;
+    ctxAddr: number;
+    currentReg: number;
+    dispCtxAddr: number;
+  } | null = null;
+
+  drawItemStructAddr = 0;
+
+  // Trace ring buffer
+  _traceEnabled = true;
+  private _traceBuffer: string[] = [];
+  private _traceIdx = 0;
+  private readonly _traceSize = 1024;
+
+  // EIP ring buffer
+  _eipRing = new Uint32Array(131072); // power of 2 for bitmask indexing
+  _eipRingIdx = 0;
+  _eipRingFull = false;
+
+  trace(msg: string): void {
+    if (this._traceBuffer.length < this._traceSize) {
+      this._traceBuffer.push(msg);
+    } else {
+      this._traceBuffer[this._traceIdx] = msg;
+    }
+    this._traceIdx = (this._traceIdx + 1) % this._traceSize;
+  }
+
+  dumpTrace(): void {
+    console.log('=== THUNK TRACE (oldest first) ===');
+    const len = this._traceBuffer.length;
+    const start = len < this._traceSize ? 0 : this._traceIdx;
+    for (let i = 0; i < len; i++) {
+      console.log(this._traceBuffer[(start + i) % len]);
+    }
+    console.log('=== END THUNK TRACE ===');
+
+    const ringLen = this._eipRingFull ? this._eipRing.length : this._eipRingIdx;
+    const ringStart = this._eipRingFull ? this._eipRingIdx : 0;
+    console.log(`=== EIP TRACE (last ${ringLen} instructions) ===`);
+    const eips: number[] = [];
+    for (let i = 0; i < ringLen; i++) {
+      eips.push(this._eipRing[(ringStart + i) % this._eipRing.length]);
+    }
+    const last50 = eips.slice(-50);
+    for (const eip of last50) {
+      const b: string[] = [];
+      for (let j = 0; j < 6; j++) b.push(this.memory.readU8((eip + j) >>> 0).toString(16).padStart(2, '0'));
+      console.log(`  0x${eip.toString(16)}: ${b.join(' ')}`);
+    }
+    console.log('=== END EIP TRACE ===');
+  }
+
+  // Resource caches
+  stringCache = new Map<number, string>();
+  bitmapCache = new Map<number, number>();
+  bitmapNameCache?: Map<string, number>;
+
+  // Audio
+  audioContext?: AudioContext;
+
+  // Generic common dialog request — UI renders the appropriate dialog
+  onShowCommonDialog?: (req: CommonDialogRequest) => void;
+
+  // Callbacks for UI
+  onMenu?: (menuId: number) => void;
+  onWindowChange?: (wnd: WindowInfo) => void;
+  onShowDialog?: (info: DialogInfo) => void;
+  onCloseDialog?: () => void;
+  onControlsChanged?: (controls: ControlOverlay[]) => void;
+  onMenuChanged?: () => void;
+  onCrash?: (eip: string, description: string) => void;
+  onExit?: () => void;
+  onCreateProcess?: (exeName: string, commandLine: string) => void;
+  onCreateChildConsole?: (exeName: string, commandLine: string, hProcess: number) => void;
+
+  _childProcessWaiting = false;
+  _childProcessResume: { stackBytes: number; completer: (emu: Emulator, stackBytes: number, retVal: number) => void } | null = null;
+  /** Callback to show browser file picker (open/save). Returns file info or null if cancelled. */
+  onFileDialog?: (type: 'open' | 'save', filter?: string, title?: string) => Promise<{ name: string; data: ArrayBuffer } | null>;
+  menuItems?: import('../pe/types').MenuItem[];
+
+  // Shared process registry (set by host to share across emulator instances)
+  processRegistry?: ProcessRegistry;
+  /** PID assigned to this emulator instance */
+  pid = 0;
+  /** EXE name for this instance (e.g. "taskmgr.exe") */
+  exeName = '';
+  /** Full path of the loaded EXE (e.g. "D:\\subdir\\some.exe"), set at load time */
+  exePath = '';
+
+  // Dialog state — stack supports nested dialogs
+  dialogState: {
+    hwnd: number;
+    dlgProc: number;
+    info: DialogInfo;
+    result: number;
+    ended: boolean;
+  } | null = null;
+  _dialogResolve: ((result: number) => void) | null = null;
+  _dialogPumpTimer: ReturnType<typeof setInterval> | null = null;
+  _dialogStack: Array<{
+    dialogState: NonNullable<Emulator['dialogState']>;
+    resolve: ((result: number) => void) | null;
+    pumpTimer: ReturnType<typeof setInterval> | null;
+  }> = [];
+
+  // MessageBox state — supports multiple simultaneous message boxes
+  messageBoxes: { id: number; caption: string; text: string; type: number; onDismiss: (result: number) => void }[] = [];
+  _nextMessageBoxId = 1;
+  onShowMessageBox?: (id: number, caption: string, text: string, type: number) => void;
+
+  _endDialog(result: number): void {
+    if (this._dialogPumpTimer !== null) { clearInterval(this._dialogPumpTimer); this._dialogPumpTimer = null; }
+    const resolve = this._dialogResolve;
+    this._dialogResolve = null;
+    const wnd = this.dialogState ? this.handles.get(this.dialogState.hwnd) : null;
+    if (wnd) this.handles.free(this.dialogState!.hwnd);
+    // Pop outer dialog from stack (if any)
+    const outer = this._dialogStack.pop();
+    if (outer) {
+      this.dialogState = outer.dialogState;
+      this._dialogResolve = outer.resolve;
+      this._dialogPumpTimer = outer.pumpTimer;
+      // Re-show outer dialog in UI
+      this.onShowDialog?.(outer.dialogState.info);
+    } else {
+      this.dialogState = null;
+      this.onCloseDialog?.();
+    }
+    // Defer resolve so that if EndDialog is called from inside the dialog pump's
+    // callWndProc (where ESP is in a nested frame), the pump can restore EIP/ESP
+    // to the original DialogBoxParam stack frame before emuCompleteThunk runs.
+    if (resolve) queueMicrotask(() => resolve(result));
+  }
+
+  dismissDialog(action: number, updatedValues: Map<number, string>): void {
+    if (!this.dialogState) return;
+    // Merge user-edited values into both controlValues and child window titles
+    for (const [id, val] of updatedValues) {
+      this.dialogState.info.controlValues.set(id, val);
+      const dlgWnd = this.handles.get<WindowInfo>(this.dialogState.hwnd);
+      if (dlgWnd?.children) {
+        const childHwnd = dlgWnd.children.get(id);
+        if (childHwnd) {
+          const child = this.handles.get<WindowInfo>(childHwnd);
+          if (child) child.title = val;
+        }
+      }
+    }
+
+    // Send WM_COMMAND to the dialog so the app can read values and call EndDialog.
+    // This is what Windows does when the user clicks a button — the dialog proc
+    // handles WM_COMMAND/IDOK, calls GetDlgItemInt/GetDlgItemText, then EndDialog.
+    const ds = this.dialogState;
+    if (!ds.ended) {
+      const dlgWnd = this.handles.get<WindowInfo>(ds.hwnd);
+      const wndProc = dlgWnd?.wndProc || ds.dlgProc;
+      if (wndProc) {
+        const WM_COMMAND = 0x0111;
+        const savedEIP = this.cpu.eip;
+        const savedESP = this.cpu.reg[4];
+        const savedWaiting = this.waitingForMessage;
+        this.waitingForMessage = false;
+        // wParam = MAKEWPARAM(controlId, BN_CLICKED=0); lParam = button hwnd (0 if unknown)
+        const buttonHwnd = dlgWnd?.children?.get(action) ?? 0;
+        this.callWndProc(wndProc, ds.hwnd, WM_COMMAND, action, buttonHwnd);
+        this.cpu.eip = savedEIP;
+        this.cpu.reg[4] = savedESP;
+        this.waitingForMessage = savedWaiting;
+      }
+    }
+
+    // If the app's dlgProc didn't call EndDialog, end it ourselves
+    if (!ds.ended) {
+      ds.result = action;
+      ds.ended = true;
+      this._endDialog(action);
+    }
+  }
+
+  /** Show a MessageBox — onDismiss is called synchronously when user dismisses it. */
+  showMessageBox(caption: string, text: string, type: number, onDismiss: (result: number) => void): void {
+    const id = this._nextMessageBoxId++;
+    this.messageBoxes.push({ id, caption, text, type, onDismiss });
+    this.onShowMessageBox?.(id, caption, text, type);
+  }
+
+  dismissMessageBox(id: number, result: number): void {
+    const idx = this.messageBoxes.findIndex(mb => mb.id === id);
+    if (idx < 0) return;
+    const mb = this.messageBoxes[idx];
+    this.messageBoxes.splice(idx, 1);
+    mb.onDismiss(result);
+  }
+
+  constructor() {
+    this.cpu = new CPU(this.memory);
+    // Pre-allocate a default IDC_ARROW cursor so currentCursor is never 0
+    this.currentCursor = this.handles.alloc('cursor', { css: 'default' });
+  }
+
+  initConsoleBuffer(): void {
+    this.consoleBuffer = new Array(80 * 25);
+    for (let i = 0; i < 80 * 25; i++) {
+      this.consoleBuffer[i] = { char: 0x20, attr: 0x07 };
+    }
+    this.consoleCursorX = 0;
+    this.consoleCursorY = 0;
+  }
+
+  consoleWriteChar(ch: number): void {
+    if (ch === 0x0D) { // \r
+      this.consoleCursorX = 0;
+      return;
+    }
+    if (ch === 0x0A) { // \n
+      this.consoleCursorX = 0;
+      this.consoleCursorY++;
+      if (this.consoleCursorY >= 25) this.consoleScrollUp();
+      return;
+    }
+    if (ch === 0x08) { // backspace
+      if (this.consoleCursorX > 0) this.consoleCursorX--;
+      return;
+    }
+    if (ch === 0x07) return; // bell
+    if (ch === 0x09) { // tab
+      const next = (this.consoleCursorX + 8) & ~7;
+      this.consoleCursorX = Math.min(next, 79);
+      return;
+    }
+    const wide = isFullwidth(ch);
+    // Fullwidth char needs 2 columns; if only 1 left, wrap to next line
+    if (wide && this.consoleCursorX >= 79) {
+      this.consoleCursorX = 0;
+      this.consoleCursorY++;
+      if (this.consoleCursorY >= 25) this.consoleScrollUp();
+    }
+    const idx = this.consoleCursorY * 80 + this.consoleCursorX;
+    if (idx >= 0 && idx < this.consoleBuffer.length) {
+      this.consoleBuffer[idx] = { char: ch, attr: this.consoleAttr };
+    }
+    this.consoleCursorX++;
+    if (wide) {
+      // Write trailing cell marker (char=0 signals "continuation of fullwidth char")
+      const idx2 = this.consoleCursorY * 80 + this.consoleCursorX;
+      if (idx2 >= 0 && idx2 < this.consoleBuffer.length) {
+        this.consoleBuffer[idx2] = { char: 0, attr: this.consoleAttr };
+      }
+      this.consoleCursorX++;
+    }
+    if (this.consoleCursorX >= 80) {
+      this.consoleCursorX = 0;
+      this.consoleCursorY++;
+      if (this.consoleCursorY >= 25) this.consoleScrollUp();
+    }
+  }
+
+  consoleScrollUp(): void {
+    for (let i = 0; i < 80 * 24; i++) {
+      this.consoleBuffer[i] = this.consoleBuffer[i + 80];
+    }
+    for (let i = 80 * 24; i < 80 * 25; i++) {
+      this.consoleBuffer[i] = { char: 0x20, attr: this.consoleAttr };
+    }
+    this.consoleCursorY = 24;
+  }
+
+  // Delegated to emu-load.ts
+  load(arrayBuffer: ArrayBuffer, peInfo: PEInfo, canvas: HTMLCanvasElement): void {
+    emuLoad(this, arrayBuffer, peInfo, canvas);
+  }
+
+  findResourceEntry(typeId: number | string, nameId: number | string): { dataRva: number; dataSize: number } | null {
+    return emuFindResourceEntry(this, typeId, nameId);
+  }
+
+  // NE local heap allocation (returns offset within data segment)
+  allocLocal(size: number): number {
+    if (size === 0) size = 1;
+    const aligned = (size + 3) & ~3;
+    const addr = this.localHeapPtr;
+    if (addr + aligned > this.localHeapEnd) return 0; // out of memory
+    this.localHeapPtr += aligned;
+    for (let i = 0; i < aligned; i++) this.memory.writeU8(addr + i, 0);
+    return addr & 0xFFFF; // return offset within segment
+  }
+
+  // Public API for kernel32 heap
+  allocHeap(size: number): number {
+    if (size === 0) size = 1;
+    const aligned = (size + 7) & ~7;
+    const addr = this.heapPtr;
+    this.heapPtr += aligned;
+    for (let i = 0; i < aligned; i++) this.memory.writeU8(addr + i, 0);
+    this.heapAllocSizes.set(addr, size);
+    return addr;
+  }
+
+  reallocHeap(oldAddr: number, newSize: number): number {
+    if (oldAddr === 0) return this.allocHeap(newSize);
+    const oldSize = this.heapAllocSizes.get(oldAddr) || 0;
+    const newAddr = this.allocHeap(newSize);
+    if (oldSize > 0) {
+      const copyLen = Math.min(oldSize, newSize);
+      for (let i = 0; i < copyLen; i++) {
+        this.memory.writeU8(newAddr + i, this.memory.readU8(oldAddr + i));
+      }
+    }
+    return newAddr;
+  }
+
+  heapSize(addr: number): number {
+    return this.heapAllocSizes.get(addr) || 0;
+  }
+
+  allocVirtual(requestedAddr: number, size: number): number {
+    if (size === 0) size = 0x1000;
+    const alignedSize = (size + 0xFFF) & ~0xFFF;
+    let addr: number;
+    if (requestedAddr !== 0) {
+      addr = (requestedAddr + 0xFFF) & ~0xFFF;
+    } else {
+      addr = this.virtualPtr;
+      this.virtualPtr = (this.virtualPtr + alignedSize + 0xFFF) & ~0xFFF;
+    }
+    for (let i = 0; i < alignedSize; i++) this.memory.writeU8(addr + i, 0);
+    this.heapAllocSizes.set(addr, alignedSize);
+    return addr >>> 0;
+  }
+
+  // Read stdcall argument from stack
+  readArg(index: number): number {
+    return this.memory.readU32((this.cpu.reg[4] + 4 + index * 4) >>> 0);
+  }
+
+  // NE (16-bit) support methods
+  readArg16(byteOffset: number): number {
+    const base = this.cpu.segBase(this.cpu.ss);
+    const sp = this.cpu.reg[4] & 0xFFFF;
+    return this.memory.readU16((base + sp + 4 + byteOffset) >>> 0);
+  }
+
+  readArg16DWord(byteOffset: number): number {
+    const base = this.cpu.segBase(this.cpu.ss);
+    const sp = this.cpu.reg[4] & 0xFFFF;
+    return this.memory.readU32((base + sp + 4 + byteOffset) >>> 0);
+  }
+
+  readPascalArgs16(sizes: number[]): number[] {
+    const result: number[] = new Array(sizes.length);
+    let offset = 0;
+    for (let i = sizes.length - 1; i >= 0; i--) {
+      if (sizes[i] === 4) {
+        result[i] = this.readArg16DWord(offset);
+      } else {
+        result[i] = this.readArg16(offset);
+      }
+      offset += sizes[i];
+    }
+    return result;
+  }
+
+  loadNEString(uID: number): string {
+    if (!this.ne) return '';
+    const blockID = Math.floor(uID / 16) + 1;
+    const indexInBlock = uID % 16;
+    const entry = this.ne.resources.find(r => r.typeID === 6 && r.id === blockID);
+    if (!entry) return '';
+    const data = new Uint8Array(this.arrayBuffer, entry.fileOffset, entry.length);
+    let off = 0;
+    for (let i = 0; i < indexInBlock; i++) {
+      if (off >= data.length) return '';
+      off += 1 + data[off];
+    }
+    if (off >= data.length) return '';
+    const len = data[off];
+    let str = '';
+    for (let j = 0; j < len && off + 1 + j < data.length; j++) {
+      str += String.fromCharCode(data[off + 1 + j]);
+    }
+    return str;
+  }
+
+  postMessage(hwnd: number, message: number, wParam: number, lParam: number): void {
+    // Route to the thread that owns the target window
+    let targetThread = this.currentThread;
+    if (hwnd && this.threads.length > 1) {
+      const wnd = this.handles.get<import('./win32/user32/types').WindowInfo>(hwnd);
+      if (wnd?.ownerThreadId) {
+        const ownerThread = this.threads.find(t => t.id === wnd.ownerThreadId);
+        if (ownerThread) targetThread = ownerThread;
+      }
+    }
+
+    const queue = targetThread ? targetThread.messageQueue : this.messageQueue;
+    const onAvail = targetThread ? targetThread._onMessageAvailable : this._onMessageAvailable;
+
+    if (message === 0x0113) { // WM_TIMER
+      console.log(`[POST] WM_TIMER hwnd=0x${hwnd.toString(16)} wParam=${wParam} lParam=0x${lParam.toString(16)} waiting=${this.waitingForMessage} qLen=${queue.length}`);
+      if (queue.some(m => m.message === 0x0113 && m.hwnd === hwnd && m.wParam === wParam)) {
+        return;
+      }
+    }
+    queue.push({ hwnd, message, wParam, lParam });
+    if (onAvail) {
+      if (targetThread) targetThread._onMessageAvailable = null;
+      else this._onMessageAvailable = null;
+      onAvail();
+    }
+  }
+
+  // Timer management
+  setWin32Timer(hwnd: number, id: number, jsTimer: number): void {
+    this.timers.set(`${hwnd}:${id}`, jsTimer);
+  }
+
+  clearWin32Timer(hwnd: number, id: number): void {
+    const key = `${hwnd}:${id}`;
+    const timer = this.timers.get(key);
+    if (timer !== undefined) {
+      clearInterval(timer);
+      this.timers.delete(key);
+    }
+  }
+
+  // Thread management
+  switchToThread(target: Thread): void {
+    if (this.currentThread && this.currentThread !== target) {
+      this.currentThread.saveFromCPU(this.cpu);
+    }
+    target.loadToCPU(this.cpu);
+    this.currentThread = target;
+  }
+
+  getNextRunnableThread(): Thread | null {
+    if (this.threads.length === 0) return null;
+    const currentIdx = this.currentThread ? this.threads.indexOf(this.currentThread) : -1;
+    for (let i = 1; i <= this.threads.length; i++) {
+      const idx = (currentIdx + i) % this.threads.length;
+      const t = this.threads[idx];
+      if (!t.exited && !t.suspended && !t.waitingForMessage) return t;
+    }
+    return null;
+  }
+
+  allThreadsWaiting(): boolean {
+    return this.threads.every(t => t.exited || t.suspended || t.waitingForMessage);
+  }
+
+  createThread(startAddr: number, param: number, stackSize: number): Thread {
+    const actualStackSize = stackSize || 0x100000; // default 1MB
+    const stackBase = this.allocVirtual(0, actualStackSize);
+    const stackTop = (stackBase + actualStackSize) >>> 0;
+
+    // Create initial state from current CPU (inherits segments, mode, etc.)
+    const state = Thread.createInitialState(this.cpu);
+    state.eip = startAddr;
+    state.reg = new Int32Array(8); // fresh registers
+    state.reg[4] = stackTop; // ESP
+
+    const thread = new Thread(this.nextThreadId++, state);
+    thread.startAddress = startAddr;
+    thread.parameter = param;
+    thread.stackTop = stackTop;
+
+    // Push parameter and a halt-sentinel return address onto the new thread's stack
+    const THREAD_EXIT_THUNK = 0x00FD0004;
+    // Ensure the thunk exists
+    if (!this.thunkToApi.has(THREAD_EXIT_THUNK)) {
+      this.thunkToApi.set(THREAD_EXIT_THUNK, { dll: 'SYSTEM', name: 'THREAD_EXIT', stackBytes: 0 });
+      this.thunkPages.add(THREAD_EXIT_THUNK >>> 12);
+      this.apiDefs.set('SYSTEM:THREAD_EXIT', {
+        handler: () => {
+          if (this.currentThread) {
+            this.currentThread.exited = true;
+            this.currentThread.exitCode = this.cpu.reg[0]; // EAX
+          }
+          // Switch to next runnable thread
+          const next = this.getNextRunnableThread();
+          if (next) {
+            this.switchToThread(next);
+          } else {
+            // All threads done
+            this.exitedNormally = true;
+            this.halted = true;
+          }
+          return undefined;
+        },
+        stackBytes: 0,
+      });
+    }
+
+    // Set up stack: push param, then return address (THREAD_EXIT_THUNK)
+    state.reg[4] -= 4;
+    this.memory.writeU32(state.reg[4] >>> 0, param);
+    state.reg[4] -= 4;
+    this.memory.writeU32(state.reg[4] >>> 0, THREAD_EXIT_THUNK);
+
+    this.threads.push(thread);
+    return thread;
+  }
+
+  // Delegated to extracted modules
+  getDC(hdc: number): DCInfo | null { return _getDC(this, hdc); }
+  promoteToMainWindow(hwnd: number, wnd: WindowInfo): void { _promoteToMainWindow(this, hwnd, wnd); }
+  setupCanvasSize(cw: number, ch: number): void { _setupCanvasSize(this, cw, ch); }
+  getWindowDC(hwnd: number): number { return _getWindowDC(this, hwnd); }
+  beginPaint(hwnd: number): number { return _beginPaint(this, hwnd); }
+  endPaint(hwnd: number, hdc: number): void { _endPaint(this, hwnd, hdc); }
+  renderChildControls(hwnd: number): void { _renderChildControls(this, hwnd); }
+  repaintChildWindows(hwnd: number): void {
+    const wnd = this.handles.get<WindowInfo>(hwnd);
+    if (!wnd?.childList) return;
+    const WM_PAINT = 0x000F;
+    for (const childHwnd of wnd.childList) {
+      const child = this.handles.get<WindowInfo>(childHwnd);
+      if (!child || !child.visible || !child.wndProc) continue;
+      child.needsPaint = true;
+      this.callWndProc(child.wndProc, childHwnd, WM_PAINT, 0, 0);
+      child.needsPaint = false;
+    }
+  }
+  notifyControlOverlays(): void { _notifyControlOverlays(this); }
+  syncDCToCanvas(hdc: number): void { _syncDCToCanvas(this, hdc); }
+  releaseChildDC(hdc: number): void { _releaseChildDC(this, hdc); }
+  dispatchToSehHandler(frameAddr: number): void { _dispatchToSehHandler(this, frameAddr); }
+  getBrush(handle: number): BrushInfo | null { return _getBrush(this, handle); }
+  getPen(handle: number): PenInfo | null { return _getPen(this, handle); }
+  loadBitmapResource(resourceId: number): number { return _loadBitmapResource(this, resourceId); }
+  loadBitmapResourceFromModule(hInstance: number, resourceId: number): number { return _loadBitmapResourceFromModule(this, hInstance, resourceId); }
+  loadBitmapResourceByName(name: string): number { return _loadBitmapResourceByName(this, name); }
+  loadCursorResourceByName(name: string): number { return _loadCursorResourceByName(this, name); }
+  loadStringResource(id: number): string | null { return _loadStringResource(this, id); }
+  loadIconResource(resourceId: number): number { return _loadIconResource(this, resourceId); }
+
+  // Delegated to emu-exec.ts
+  callWndProc(wndProc: number, hwnd: number, message: number, wParam: number, lParam: number): number | undefined {
+    return emuCallWndProc(this, wndProc, hwnd, message, wParam, lParam);
+  }
+
+  callWndProc16(wndProc: number, hwnd: number, message: number, wParam: number, lParam: number): number | undefined {
+    return emuCallWndProc16(this, wndProc, hwnd, message, wParam, lParam);
+  }
+
+  callNative(addr: number): number | undefined {
+    return emuCallNative(this, addr);
+  }
+
+  /** Resolve a pending console input wait (ReadConsoleW, ReadConsoleInput, _getch, WaitForSingleObject stdin) */
+  deliverConsoleInput(retVal: number): void {
+    if (this._consoleInputResume) {
+      const { stackBytes, completer } = this._consoleInputResume;
+      this._consoleInputResume = null;
+      this.waitingForMessage = false;
+      completer(this, retVal, stackBytes);
+      if (this.running && !this.halted) {
+        requestAnimationFrame(this.tick);
+      }
+    }
+  }
+
+  /** Read an I/O port value */
+  portIn(port: number): number {
+    if (port === 0x60) {
+      // Reading port 0x60 clears the "output buffer full" bit in port 0x64
+      this._ioPorts.set(0x64, (this._ioPorts.get(0x64) ?? 0) & ~0x01);
+    }
+    return this._ioPorts.get(port) ?? 0xFF;
+  }
+
+  /** Inject a hardware keyboard event: write scancode to port 0x60 and trigger INT 09h */
+  injectHwKey(scancode: number): void {
+    // Queue all scancodes for sequential delivery — writing directly to port 0x60
+    // would lose earlier scancodes when multiple keys are injected in the same JS event.
+    this._pendingHwKeys.push(scancode);
+    // If the emulator is paused waiting for a key (INT 16h wait), wake it up
+    if (this.waitingForMessage && this.running && !this.halted) {
+      this.waitingForMessage = false;
+      requestAnimationFrame(this.tick);
+    }
+  }
+  _pendingHwKeys: number[] = [];
+  _hwKeyDelay = 0;
+
+  /** Deliver a DOS key for INT 16h blocking wait */
+  /** Write a key into the BDA keyboard buffer (for programs that read it directly) */
+  writeBdaKey(ascii: number, scan: number): void {
+    const BDA = 0x400;
+    const bufStart = this.memory.readU16(BDA + 0x80) || 0x1E;
+    const bufEnd = this.memory.readU16(BDA + 0x82) || 0x3E;
+    const tail = this.memory.readU16(BDA + 0x1C);
+    let newTail = tail + 2;
+    if (newTail >= bufEnd) newTail = bufStart;
+    const head = this.memory.readU16(BDA + 0x1A);
+    if (newTail === head) return; // buffer full
+    this.memory.writeU16(BDA + tail, (scan << 8) | ascii);
+    this.memory.writeU16(BDA + 0x1C, newTail);
+  }
+
+  deliverDosKey(): void {
+    if (this._dosWaitingForKey && this.dosKeyBuffer.length > 0) {
+      const mode = this._dosWaitingForKey;
+      this._dosWaitingForKey = false;
+      if (mode === 'peek') {
+        // AH=01/11: peek — don't consume, set ZF=false, put key in AX
+        const key = this.dosKeyBuffer[0];
+        this.cpu.setReg16(0, (key.scan << 8) | key.ascii);
+        this.cpu.setFlags(this.cpu.getFlags() & ~0x40); // clear ZF
+      } else {
+        // AH=00/10: read — consume key, put in AX
+        const key = this.dosKeyBuffer.shift()!;
+        this.cpu.setReg16(0, (key.scan << 8) | key.ascii);
+      }
+      this.waitingForMessage = false;
+      if (this.running && !this.halted) {
+        requestAnimationFrame(this.tick);
+      }
+    }
+    // Also write remaining keys to BDA buffer for programs that read it directly
+    for (const key of this.dosKeyBuffer) {
+      this.writeBdaKey(key.ascii, key.scan);
+    }
+  }
+
+  run(): void {
+    console.log('[EMU] run() called');
+    this.running = true;
+    this.halted = false;
+    this._crashFired = false;
+    this.haltReason = '';
+    this.tick();
+  }
+
+  stop(): void {
+    this.running = false;
+    this.halted = true;
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer);
+    }
+    this.timers.clear();
+  }
+
+  tick = (): void => {
+    emuTick(this);
+  };
+}

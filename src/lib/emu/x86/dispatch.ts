@@ -1,0 +1,1479 @@
+import type { CPU } from './cpu';
+import { execFPU } from './fpu';
+import { exec0F } from './ops-0f';
+import { doShift } from './shift';
+import { doMovs, doStos, doLods, doCmps, doScas } from './string';
+import { handleDosInt } from '../dos-int';
+import { LazyOp } from './lazy-op';
+
+// Register indices
+const EAX = 0, ECX = 1, EDX = 2, EBX = 3, ESP = 4, EBP = 5, ESI = 6, EDI = 7;
+
+// Flag bits
+const CF = 0x001;
+const ZF = 0x040;
+const DF = 0x400;
+const OF = 0x800;
+
+export function cpuStep(cpu: CPU): void {
+  let prefix66 = false;  // operand-size override
+  let prefix67 = false;  // address-size override
+  let prefixF2 = false;  // REPNE
+  let prefixF3 = false;  // REP
+  cpu._segOverride = 0;
+
+  // Parse prefixes
+  for (;;) {
+    const b = cpu.mem.readU8(cpu.eip >>> 0);
+    if (b === 0x66) { prefix66 = true; cpu.eip = (cpu.eip + 1) | 0; }
+    else if (b === 0x67) { prefix67 = true; cpu.eip = (cpu.eip + 1) | 0; }
+    else if (b === 0xF2) { prefixF2 = true; cpu.eip = (cpu.eip + 1) | 0; }
+    else if (b === 0xF3) { prefixF3 = true; cpu.eip = (cpu.eip + 1) | 0; }
+    else if (b === 0x64) {
+      // FS segment override — used for TEB access
+      cpu._segOverride = 0x64;
+      cpu.eip = (cpu.eip + 1) | 0;
+    } else if (b === 0x26 || b === 0x2E || b === 0x36 || b === 0x3E || b === 0x65) {
+      // Segment override prefixes: store for 16-bit mode, ignore in flat model
+      if (!cpu.use32) {
+        cpu._segOverride = b;
+      }
+      cpu.eip = (cpu.eip + 1) | 0;
+    } else {
+      break;
+    }
+  }
+
+  const defaultOpSize = cpu.use32 ? 32 : 16;
+  const opSize = prefix66 ? (defaultOpSize === 32 ? 16 : 32) : defaultOpSize;
+  // Address size affects ModRM decoding
+  cpu._addrSize16 = cpu.use32 ? prefix67 : !prefix67;
+  const opcode = cpu.fetch8();
+
+  // ALU pattern: opcodes 0x00-0x3F
+  if (opcode < 0x40 && (opcode & 0x06) !== 0x06) {
+    const aluOp = (opcode >> 3) & 7;
+    const dir = opcode & 7;
+
+    if (dir === 4) {
+      // AL, imm8
+      const imm = cpu.fetch8();
+      const result = cpu.alu(aluOp, cpu.getReg8(EAX), imm, 8);
+      if (aluOp !== 7) cpu.setReg8(EAX, result);
+    } else if (dir === 5) {
+      // EAX/AX, imm16/32
+      if (opSize === 16) {
+        const imm = cpu.fetch16();
+        const result = cpu.alu(aluOp, cpu.getReg16(EAX), imm, 16);
+        if (aluOp !== 7) cpu.setReg16(EAX, result);
+      } else {
+        const imm = cpu.fetch32();
+        const result = cpu.alu(aluOp, cpu.reg[EAX] | 0, imm | 0, 32);
+        if (aluOp !== 7) cpu.reg[EAX] = result;
+      }
+    } else if (dir === 0) {
+      // r/m8, reg8
+      const d = cpu.decodeModRM(8);
+      const result = cpu.alu(aluOp, d.val, cpu.getReg8(d.regField), 8);
+      if (aluOp !== 7) cpu.writeModRM(d, result, 8);
+    } else if (dir === 1) {
+      // r/m16/32, reg16/32
+      const d = cpu.decodeModRM(opSize);
+      const regVal = opSize === 16 ? cpu.getReg16(d.regField) : cpu.reg[d.regField] | 0;
+      const result = cpu.alu(aluOp, d.val, regVal, opSize as 8 | 16 | 32);
+      if (aluOp !== 7) cpu.writeModRM(d, result, opSize);
+    } else if (dir === 2) {
+      // reg8, r/m8
+      const d = cpu.decodeModRM(8);
+      const result = cpu.alu(aluOp, cpu.getReg8(d.regField), d.val, 8);
+      if (aluOp !== 7) cpu.setReg8(d.regField, result);
+    } else if (dir === 3) {
+      // reg16/32, r/m16/32
+      const d = cpu.decodeModRM(opSize);
+      const regVal = opSize === 16 ? cpu.getReg16(d.regField) : cpu.reg[d.regField] | 0;
+      const result = cpu.alu(aluOp, regVal, d.val, opSize as 8 | 16 | 32);
+      if (aluOp !== 7) {
+        if (opSize === 16) cpu.setReg16(d.regField, result);
+        else cpu.reg[d.regField] = result;
+      }
+    }
+    return;
+  }
+
+  switch (opcode) {
+    // INC r32 (0x40-0x47)
+    case 0x40: case 0x41: case 0x42: case 0x43:
+    case 0x44: case 0x45: case 0x46: case 0x47: {
+      const r = opcode - 0x40;
+      if (opSize === 16) {
+        const v = (cpu.getReg16(r) + 1) & 0xFFFF;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF16 = cpu.flagsCache & DF;
+        cpu.setReg16(r, v);
+        cpu.setLazy(LazyOp.INC16, v, 0, 0);
+        cpu.flagsCache = savedCF | savedDF16;
+      } else {
+        const v = (cpu.reg[r] + 1) | 0;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF32 = cpu.flagsCache & DF;
+        cpu.reg[r] = v;
+        cpu.setLazy(LazyOp.INC32, v, 0, 0);
+        cpu.flagsCache = savedCF | savedDF32;
+      }
+      break;
+    }
+
+    // DEC r32 (0x48-0x4F)
+    case 0x48: case 0x49: case 0x4A: case 0x4B:
+    case 0x4C: case 0x4D: case 0x4E: case 0x4F: {
+      const r = opcode - 0x48;
+      if (opSize === 16) {
+        const v = (cpu.getReg16(r) - 1) & 0xFFFF;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF = cpu.flagsCache & DF;
+        cpu.setReg16(r, v);
+        cpu.setLazy(LazyOp.DEC16, v, 0, 0);
+        cpu.flagsCache = savedCF | savedDF;
+      } else {
+        const v = (cpu.reg[r] - 1) | 0;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF = cpu.flagsCache & DF;
+        cpu.reg[r] = v;
+        cpu.setLazy(LazyOp.DEC32, v, 0, 0);
+        cpu.flagsCache = savedCF | savedDF;
+      }
+      break;
+    }
+
+    // PUSH ES (0x06), PUSH CS (0x0E), PUSH SS (0x16), PUSH DS (0x1E)
+    case 0x06:
+      if (opSize === 16) cpu.push16(cpu.es);
+      else cpu.push32(cpu.es);
+      break;
+    case 0x0E:
+      if (opSize === 16) cpu.push16(cpu.cs);
+      else cpu.push32(cpu.cs);
+      break;
+    case 0x16:
+      if (opSize === 16) cpu.push16(cpu.ss);
+      else cpu.push32(cpu.ss);
+      break;
+    case 0x1E:
+      if (opSize === 16) cpu.push16(cpu.ds);
+      else cpu.push32(cpu.ds);
+      break;
+
+    // POP ES (0x07), POP SS (0x17), POP DS (0x1F)
+    case 0x07:
+      cpu.es = opSize === 16 ? cpu.pop16() : cpu.pop32() & 0xFFFF;
+      break;
+    case 0x17:
+      cpu.ss = opSize === 16 ? cpu.pop16() : cpu.pop32() & 0xFFFF;
+      break;
+    case 0x1F:
+      cpu.ds = opSize === 16 ? cpu.pop16() : cpu.pop32() & 0xFFFF;
+      break;
+
+    // PUSH r32 (0x50-0x57)
+    case 0x50: case 0x51: case 0x52: case 0x53:
+    case 0x54: case 0x55: case 0x56: case 0x57:
+      if (opSize === 16) cpu.push16(cpu.getReg16(opcode - 0x50));
+      else cpu.push32(cpu.reg[opcode - 0x50] | 0);
+      break;
+
+    // POP r32 (0x58-0x5F)
+    case 0x58: case 0x59: case 0x5A: case 0x5B:
+    case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+      if (opSize === 16) cpu.setReg16(opcode - 0x58, cpu.pop16());
+      else cpu.reg[opcode - 0x58] = cpu.pop32() | 0;
+      break;
+
+    // PUSHAD / PUSHA
+    case 0x60: {
+      if (opSize === 16) {
+        const tmp = cpu.getReg16(ESP);
+        cpu.push16(cpu.getReg16(EAX));
+        cpu.push16(cpu.getReg16(ECX));
+        cpu.push16(cpu.getReg16(EDX));
+        cpu.push16(cpu.getReg16(EBX));
+        cpu.push16(tmp);
+        cpu.push16(cpu.getReg16(EBP));
+        cpu.push16(cpu.getReg16(ESI));
+        cpu.push16(cpu.getReg16(EDI));
+      } else {
+        const tmp = cpu.reg[ESP] | 0;
+        cpu.push32(cpu.reg[EAX]);
+        cpu.push32(cpu.reg[ECX]);
+        cpu.push32(cpu.reg[EDX]);
+        cpu.push32(cpu.reg[EBX]);
+        cpu.push32(tmp);
+        cpu.push32(cpu.reg[EBP]);
+        cpu.push32(cpu.reg[ESI]);
+        cpu.push32(cpu.reg[EDI]);
+      }
+      break;
+    }
+
+    // POPAD / POPA
+    case 0x61: {
+      if (opSize === 16) {
+        cpu.setReg16(EDI, cpu.pop16());
+        cpu.setReg16(ESI, cpu.pop16());
+        cpu.setReg16(EBP, cpu.pop16());
+        cpu.pop16(); // skip SP
+        cpu.setReg16(EBX, cpu.pop16());
+        cpu.setReg16(EDX, cpu.pop16());
+        cpu.setReg16(ECX, cpu.pop16());
+        cpu.setReg16(EAX, cpu.pop16());
+      } else {
+        cpu.reg[EDI] = cpu.pop32() | 0;
+        cpu.reg[ESI] = cpu.pop32() | 0;
+        cpu.reg[EBP] = cpu.pop32() | 0;
+        cpu.pop32(); // skip ESP
+        cpu.reg[EBX] = cpu.pop32() | 0;
+        cpu.reg[EDX] = cpu.pop32() | 0;
+        cpu.reg[ECX] = cpu.pop32() | 0;
+        cpu.reg[EAX] = cpu.pop32() | 0;
+      }
+      break;
+    }
+
+    // BOUND r32, m32&32 — check array index against bounds
+    case 0x62: {
+      cpu.decodeModRM(32);
+      break;
+    }
+
+    // PUSH imm32
+    case 0x68:
+      if (opSize === 16) cpu.push16(cpu.fetch16());
+      else cpu.push32(cpu.fetch32());
+      break;
+
+    // IMUL r32, r/m32, imm32
+    case 0x69: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) {
+        const imm = (cpu.fetch16() << 16 >> 16); // sign extend
+        const result = (d.val << 16 >> 16) * imm;
+        cpu.setReg16(d.regField, result & 0xFFFF);
+        const truncated = (result << 16) >> 16;
+        const of = truncated !== result;
+        const f = cpu.getFlags() & ~(CF | OF);
+        cpu.setFlags(f | (of ? CF | OF : 0));
+      } else {
+        const imm = cpu.fetchI32();
+        const result = Math.imul(d.val | 0, imm);
+        cpu.reg[d.regField] = result;
+        cpu.setFlags(cpu.getFlags() & ~(CF | OF));
+      }
+      break;
+    }
+
+    // PUSH imm8 (sign-extended)
+    case 0x6A: {
+      const imm = cpu.fetchI8();
+      if (opSize === 16) cpu.push16(imm & 0xFFFF);
+      else cpu.push32(imm);
+      break;
+    }
+
+    // IMUL r32, r/m32, imm8
+    case 0x6B: {
+      const d = cpu.decodeModRM(opSize);
+      const imm = cpu.fetchI8();
+      if (opSize === 16) {
+        const result = (d.val << 16 >> 16) * imm;
+        cpu.setReg16(d.regField, result & 0xFFFF);
+      } else {
+        const result = Math.imul(d.val | 0, imm);
+        cpu.reg[d.regField] = result;
+      }
+      cpu.setFlags(cpu.getFlags() & ~(CF | OF));
+      break;
+    }
+
+    // Jcc short (0x70-0x7F)
+    case 0x70: case 0x71: case 0x72: case 0x73:
+    case 0x74: case 0x75: case 0x76: case 0x77:
+    case 0x78: case 0x79: case 0x7A: case 0x7B:
+    case 0x7C: case 0x7D: case 0x7E: case 0x7F: {
+      const disp = cpu.fetchI8();
+      if (cpu.testCC(opcode - 0x70)) {
+        if (!cpu.use32) {
+          const csBase = cpu.segBase(cpu.cs);
+          cpu.eip = csBase + (((cpu.eip - csBase) + disp) & 0xFFFF);
+        } else {
+          cpu.eip = (cpu.eip + disp) | 0;
+        }
+      }
+      break;
+    }
+
+    // ALU r/m8, imm8 (0x80)
+    case 0x80: {
+      const d = cpu.decodeModRM(8);
+      const imm = cpu.fetch8();
+      const result = cpu.alu(d.regField, d.val, imm, 8);
+      if (d.regField !== 7) cpu.writeModRM(d, result, 8);
+      break;
+    }
+
+    // ALU r/m32, imm32 (0x81)
+    case 0x81: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) {
+        const imm = cpu.fetch16();
+        const result = cpu.alu(d.regField, d.val, imm, 16);
+        if (d.regField !== 7) cpu.writeModRM(d, result, 16);
+      } else {
+        const imm = cpu.fetch32();
+        const result = cpu.alu(d.regField, d.val | 0, imm | 0, 32);
+        if (d.regField !== 7) cpu.writeModRM(d, result, 32);
+      }
+      break;
+    }
+
+    // ALU r/m8, imm8 (same as 80h for 8-bit)
+    case 0x82: {
+      const d = cpu.decodeModRM(8);
+      const imm = cpu.fetch8();
+      const result = cpu.alu(d.regField, d.val, imm, 8);
+      if (d.regField !== 7) cpu.writeModRM(d, result, 8);
+      break;
+    }
+
+    // ALU r/m32, imm8 sign-extended (0x83)
+    case 0x83: {
+      const d = cpu.decodeModRM(opSize);
+      const imm = cpu.fetchI8();
+      if (opSize === 16) {
+        const result = cpu.alu(d.regField, d.val, imm & 0xFFFF, 16);
+        if (d.regField !== 7) cpu.writeModRM(d, result, 16);
+      } else {
+        const result = cpu.alu(d.regField, d.val | 0, imm, 32);
+        if (d.regField !== 7) cpu.writeModRM(d, result, 32);
+      }
+      break;
+    }
+
+    // TEST r/m8, r8
+    case 0x84: {
+      const d = cpu.decodeModRM(8);
+      const result = d.val & cpu.getReg8(d.regField);
+      cpu.setLazy(LazyOp.AND8, result, d.val, cpu.getReg8(d.regField));
+      break;
+    }
+
+    // TEST r/m32, r32
+    case 0x85: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) {
+        const result = d.val & cpu.getReg16(d.regField);
+        cpu.setLazy(LazyOp.AND16, result, d.val, cpu.getReg16(d.regField));
+      } else {
+        const result = (d.val & cpu.reg[d.regField]) | 0;
+        cpu.setLazy(LazyOp.AND32, result, d.val, cpu.reg[d.regField]);
+      }
+      break;
+    }
+
+    // XCHG r/m8, r8
+    case 0x86: {
+      const d = cpu.decodeModRM(8);
+      const regVal = cpu.getReg8(d.regField);
+      cpu.setReg8(d.regField, d.val);
+      cpu.writeModRM(d, regVal, 8);
+      break;
+    }
+
+    // XCHG r/m32, r32
+    case 0x87: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) {
+        const regVal = cpu.getReg16(d.regField);
+        cpu.setReg16(d.regField, d.val);
+        cpu.writeModRM(d, regVal, 16);
+      } else {
+        const regVal = cpu.reg[d.regField] | 0;
+        cpu.reg[d.regField] = d.val | 0;
+        cpu.writeModRM(d, regVal, 32);
+      }
+      break;
+    }
+
+    // MOV r/m8, r8
+    case 0x88: {
+      const d = cpu.decodeModRM(8);
+      cpu.writeModRM(d, cpu.getReg8(d.regField), 8);
+      break;
+    }
+
+    // MOV r/m32, r32
+    case 0x89: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) cpu.writeModRM(d, cpu.getReg16(d.regField), 16);
+      else cpu.writeModRM(d, cpu.reg[d.regField] | 0, 32);
+      break;
+    }
+
+    // MOV r8, r/m8
+    case 0x8A: {
+      const d = cpu.decodeModRM(8);
+      cpu.setReg8(d.regField, d.val);
+      break;
+    }
+
+    // MOV r32, r/m32
+    case 0x8B: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) cpu.setReg16(d.regField, d.val);
+      else cpu.reg[d.regField] = d.val | 0;
+      break;
+    }
+
+    // MOV r/m16, Sreg
+    case 0x8C: {
+      const d = cpu.decodeModRM(16);
+      let sregVal = 0;
+      if (!cpu.use32) {
+        switch (d.regField) {
+          case 0: sregVal = cpu.es; break;
+          case 1: sregVal = cpu.cs; break;
+          case 2: sregVal = cpu.ss; break;
+          case 3: sregVal = cpu.ds; break;
+        }
+      }
+      cpu.writeModRM(d, sregVal, 16);
+      break;
+    }
+
+    // LEA r32, m — loads effective address (offset only, no segment base)
+    case 0x8D: {
+      const d = cpu.decodeModRM(opSize) as { isReg: boolean; regField: number; val: number; addr: number; ea?: number };
+      if (cpu._addrSize16 && d.ea !== undefined) {
+        // In 16-bit mode, use the raw effective address (without segment base)
+        cpu.setReg16(d.regField, d.ea & 0xFFFF);
+      } else if (opSize === 16) {
+        cpu.setReg16(d.regField, d.addr & 0xFFFF);
+      } else {
+        cpu.reg[d.regField] = d.addr | 0;
+      }
+      break;
+    }
+
+    // MOV Sreg, r/m16
+    case 0x8E: {
+      const d = cpu.decodeModRM(16);
+      if (!cpu.use32) {
+        switch (d.regField) {
+          case 0: cpu.es = d.val & 0xFFFF; break;
+          case 1: cpu.cs = d.val & 0xFFFF; break;
+          case 2: cpu.ss = d.val & 0xFFFF; break;
+          case 3: cpu.ds = d.val & 0xFFFF; break;
+        }
+      }
+      break;
+    }
+
+    // POP r/m32
+    case 0x8F: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) cpu.writeModRM(d, cpu.pop16(), 16);
+      else cpu.writeModRM(d, cpu.pop32(), 32);
+      break;
+    }
+
+    // NOP / XCHG EAX, r32
+    case 0x90:
+      break; // NOP
+
+    case 0x91: case 0x92: case 0x93:
+    case 0x94: case 0x95: case 0x96: case 0x97: {
+      const r = opcode - 0x90;
+      const tmp = cpu.reg[EAX];
+      cpu.reg[EAX] = cpu.reg[r];
+      cpu.reg[r] = tmp;
+      break;
+    }
+
+    // CWDE / CBW
+    case 0x98:
+      if (opSize === 16) {
+        cpu.setReg16(EAX, (cpu.getReg8(EAX) << 24 >> 24) & 0xFFFF);
+      } else {
+        cpu.reg[EAX] = (cpu.getReg16(EAX) << 16 >> 16);
+      }
+      break;
+
+    // CDQ / CWD
+    case 0x99:
+      if (opSize === 16) {
+        cpu.setReg16(EDX, (cpu.getReg16(EAX) & 0x8000) ? 0xFFFF : 0);
+      } else {
+        cpu.reg[EDX] = (cpu.reg[EAX] | 0) < 0 ? -1 : 0;
+      }
+      break;
+
+    // CALL FAR ptr16:16/32
+    case 0x9A: {
+      if (!cpu.use32) {
+        const offset = cpu.fetch16();
+        const selector = cpu.fetch16();
+        cpu.push16(cpu.cs);
+        cpu.push16((cpu.eip - (cpu.segBase(cpu.cs))) & 0xFFFF);
+        cpu.cs = selector;
+        cpu.eip = (cpu.segBase(selector)) + offset;
+      } else {
+        const offset = opSize === 16 ? cpu.fetch16() : cpu.fetch32();
+        cpu.fetch16(); // segment selector — consumed and ignored in flat model
+        cpu.push32(cpu.eip);
+        cpu.eip = offset;
+      }
+      break;
+    }
+
+    // PUSHF/PUSHFD
+    case 0x9C:
+      if (opSize === 16) cpu.push16(cpu.getFlags() & 0xFFFF);
+      else cpu.push32(cpu.getFlags());
+      break;
+
+    // POPF/POPFD
+    case 0x9D:
+      if (opSize === 16) cpu.setFlags(cpu.pop16() | 0x0002);
+      else cpu.setFlags(cpu.pop32() | 0x0002);
+      break;
+
+    // SAHF
+    case 0x9E:
+      cpu.setFlags((cpu.getFlags() & ~0xFF) | (cpu.getReg8(4) & 0xD7) | 0x02);
+      break;
+
+    // LAHF
+    case 0x9F:
+      cpu.setReg8(4, cpu.getFlags() & 0xFF);
+      break;
+
+    // FWAIT / WAIT
+    case 0x9B:
+      break;
+
+    // MOV AL, moffs8
+    case 0xA0: {
+      let maddr: number;
+      if (cpu._addrSize16) {
+        maddr = cpu.fetch16();
+        const segSel = cpu._segOverride ? cpu.getSegOverrideSel() : cpu.ds;
+        maddr = ((cpu.segBase(segSel)) + maddr) >>> 0;
+      } else {
+        maddr = cpu.fetch32();
+        if (cpu._segOverride === 0x64) maddr = (maddr + cpu.fsBase) >>> 0; else maddr >>>= 0;
+      }
+      cpu.setReg8(EAX, cpu.mem.readU8(maddr));
+      break;
+    }
+
+    // MOV EAX/AX, moffs16/32
+    case 0xA1: {
+      let maddr: number;
+      if (cpu._addrSize16) {
+        maddr = cpu.fetch16();
+        const segSel = cpu._segOverride ? cpu.getSegOverrideSel() : cpu.ds;
+        maddr = ((cpu.segBase(segSel)) + maddr) >>> 0;
+      } else {
+        maddr = cpu.fetch32();
+        if (cpu._segOverride === 0x64) maddr = (maddr + cpu.fsBase) >>> 0; else maddr >>>= 0;
+      }
+      if (opSize === 16) cpu.setReg16(EAX, cpu.mem.readU16(maddr));
+      else cpu.reg[EAX] = cpu.mem.readU32(maddr) | 0;
+      break;
+    }
+
+    // MOV moffs8, AL
+    case 0xA2: {
+      let maddr: number;
+      if (cpu._addrSize16) {
+        maddr = cpu.fetch16();
+        const segSel = cpu._segOverride ? cpu.getSegOverrideSel() : cpu.ds;
+        maddr = ((cpu.segBase(segSel)) + maddr) >>> 0;
+      } else {
+        maddr = cpu.fetch32();
+        if (cpu._segOverride === 0x64) maddr = (maddr + cpu.fsBase) >>> 0; else maddr >>>= 0;
+      }
+      cpu.mem.writeU8(maddr, cpu.getReg8(EAX));
+      break;
+    }
+
+    // MOV moffs32/16, EAX/AX
+    case 0xA3: {
+      let maddr: number;
+      if (cpu._addrSize16) {
+        maddr = cpu.fetch16();
+        const segSel = cpu._segOverride ? cpu.getSegOverrideSel() : cpu.ds;
+        maddr = ((cpu.segBase(segSel)) + maddr) >>> 0;
+      } else {
+        maddr = cpu.fetch32();
+        if (cpu._segOverride === 0x64) maddr = (maddr + cpu.fsBase) >>> 0; else maddr >>>= 0;
+      }
+      if (opSize === 16) cpu.mem.writeU16(maddr, cpu.getReg16(EAX));
+      else cpu.mem.writeU32(maddr, cpu.reg[EAX] >>> 0);
+      break;
+    }
+
+    // MOVSB
+    case 0xA4:
+      doMovs(cpu, 1, prefixF3 || prefixF2);
+      break;
+
+    // MOVSD
+    case 0xA5:
+      doMovs(cpu, opSize === 16 ? 2 : 4, prefixF3 || prefixF2);
+      break;
+
+    // CMPSB
+    case 0xA6:
+      doCmps(cpu, 1, prefixF3, prefixF2);
+      break;
+
+    // CMPSD
+    case 0xA7:
+      doCmps(cpu, opSize === 16 ? 2 : 4, prefixF3, prefixF2);
+      break;
+
+    // TEST AL, imm8
+    case 0xA8: {
+      const imm = cpu.fetch8();
+      cpu.setLazy(LazyOp.AND8, cpu.getReg8(EAX) & imm, cpu.getReg8(EAX), imm);
+      break;
+    }
+
+    // TEST EAX, imm32
+    case 0xA9: {
+      if (opSize === 16) {
+        const imm = cpu.fetch16();
+        cpu.setLazy(LazyOp.AND16, cpu.getReg16(EAX) & imm, cpu.getReg16(EAX), imm);
+      } else {
+        const imm = cpu.fetch32();
+        cpu.setLazy(LazyOp.AND32, (cpu.reg[EAX] & (imm | 0)) | 0, cpu.reg[EAX], imm);
+      }
+      break;
+    }
+
+    // STOSB
+    case 0xAA:
+      doStos(cpu, 1, prefixF3 || prefixF2);
+      break;
+
+    // STOSD
+    case 0xAB:
+      doStos(cpu, opSize === 16 ? 2 : 4, prefixF3 || prefixF2);
+      break;
+
+    // LODSB
+    case 0xAC:
+      doLods(cpu, 1, prefixF3 || prefixF2);
+      break;
+
+    // LODSD
+    case 0xAD:
+      doLods(cpu, opSize === 16 ? 2 : 4, prefixF3 || prefixF2);
+      break;
+
+    // SCASB
+    case 0xAE:
+      doScas(cpu, 1, prefixF3, prefixF2);
+      break;
+
+    // SCASD
+    case 0xAF:
+      doScas(cpu, opSize === 16 ? 2 : 4, prefixF3, prefixF2);
+      break;
+
+    // MOV r8, imm8 (0xB0-0xB7)
+    case 0xB0: case 0xB1: case 0xB2: case 0xB3:
+    case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+      cpu.setReg8(opcode - 0xB0, cpu.fetch8());
+      break;
+
+    // MOV r32, imm32 (0xB8-0xBF)
+    case 0xB8: case 0xB9: case 0xBA: case 0xBB:
+    case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+      if (opSize === 16) cpu.setReg16(opcode - 0xB8, cpu.fetch16());
+      else cpu.reg[opcode - 0xB8] = cpu.fetch32() | 0;
+      break;
+
+    // Shift/Rotate r/m8, imm8 (0xC0)
+    case 0xC0: {
+      const d = cpu.decodeModRM(8);
+      const count = cpu.fetch8() & 0x1F;
+      if (count) cpu.writeModRM(d, doShift(cpu, d.regField, d.val, count, 8), 8);
+      break;
+    }
+
+    // Shift/Rotate r/m32, imm8 (0xC1)
+    case 0xC1: {
+      const d = cpu.decodeModRM(opSize);
+      const count = cpu.fetch8() & 0x1F;
+      if (count) cpu.writeModRM(d, doShift(cpu, d.regField, d.val, count, opSize as 8 | 16 | 32), opSize);
+      break;
+    }
+
+    // RET imm16
+    case 0xC2: {
+      const imm = cpu.fetch16();
+      if (!cpu.use32 && opSize === 16) {
+        const ip = cpu.pop16();
+        const csBase = cpu.segBase(cpu.cs);
+        cpu.eip = csBase + ip;
+        const newSp = (cpu.reg[ESP] & 0xFFFF) + imm;
+        cpu.reg[ESP] = (cpu.reg[ESP] & ~0xFFFF) | (newSp & 0xFFFF);
+      } else {
+        cpu.eip = cpu.pop32();
+        cpu.reg[ESP] = (cpu.reg[ESP] + imm) | 0;
+      }
+      break;
+    }
+
+    // RET
+    case 0xC3:
+      if (!cpu.use32 && opSize === 16) {
+        const ip = cpu.pop16();
+        const csBase = cpu.segBase(cpu.cs);
+        cpu.eip = csBase + ip;
+      } else {
+        cpu.eip = cpu.pop32();
+      }
+      break;
+
+    // RETF imm16
+    case 0xCA: {
+      const imm = cpu.fetch16();
+      if (!cpu.use32) {
+        const ip = cpu.pop16();
+        const cs = cpu.pop16();
+        cpu.cs = cs;
+        cpu.eip = (cpu.segBase(cs)) + ip;
+        const newSp = (cpu.reg[ESP] & 0xFFFF) + imm;
+        cpu.reg[ESP] = (cpu.reg[ESP] & ~0xFFFF) | (newSp & 0xFFFF);
+      } else {
+        cpu.eip = cpu.pop32();
+        cpu.reg[ESP] = (cpu.reg[ESP] + imm) | 0;
+      }
+      break;
+    }
+
+    // RETF
+    case 0xCB:
+      if (!cpu.use32) {
+        const ip = cpu.pop16();
+        const cs = cpu.pop16();
+        cpu.cs = cs;
+        cpu.eip = (cpu.segBase(cs)) + ip;
+      } else {
+        cpu.eip = cpu.pop32();
+      }
+      break;
+
+    // LES (0xC4) / LDS (0xC5) — load far pointer
+    case 0xC4: case 0xC5: {
+      const d = cpu.decodeModRM(opSize);
+      if (!cpu.use32) {
+        const offset = d.val & 0xFFFF;
+        const selector = cpu.mem.readU16((d.addr + 2) >>> 0);
+        cpu.setReg16(d.regField, offset);
+        if (opcode === 0xC4) cpu.es = selector;
+        else cpu.ds = selector;
+      } else {
+        if (opSize === 16) cpu.setReg16(d.regField, d.val);
+        else cpu.reg[d.regField] = d.val | 0;
+      }
+      break;
+    }
+
+    // MOV r/m8, imm8
+    case 0xC6: {
+      const d = cpu.decodeModRM(8);
+      cpu.writeModRM(d, cpu.fetch8(), 8);
+      break;
+    }
+
+    // MOV r/m32, imm32
+    case 0xC7: {
+      const d = cpu.decodeModRM(opSize);
+      if (opSize === 16) cpu.writeModRM(d, cpu.fetch16(), 16);
+      else cpu.writeModRM(d, cpu.fetch32(), 32);
+      break;
+    }
+
+    // ENTER
+    case 0xC8: {
+      const frameSize = cpu.fetch16();
+      const nestingLevel = cpu.fetch8() & 0x1F;
+      if (!cpu.use32 && opSize === 16) {
+        cpu.push16(cpu.getReg16(EBP));
+        const framePtr = cpu.reg[ESP] & 0xFFFF;
+        cpu.setReg16(EBP, framePtr);
+        const newSp = (cpu.reg[ESP] & 0xFFFF) - frameSize;
+        cpu.reg[ESP] = (cpu.reg[ESP] & ~0xFFFF) | (newSp & 0xFFFF);
+      } else {
+        cpu.push32(cpu.reg[EBP]);
+        const framePtr = cpu.reg[ESP] | 0;
+        if (nestingLevel > 0) {
+          for (let i = 1; i < nestingLevel; i++) {
+            cpu.reg[EBP] = (cpu.reg[EBP] - 4) | 0;
+            cpu.push32(cpu.mem.readU32(cpu.reg[EBP] >>> 0));
+          }
+          cpu.push32(framePtr);
+        }
+        cpu.reg[EBP] = framePtr;
+        cpu.reg[ESP] = (cpu.reg[ESP] - frameSize) | 0;
+      }
+      break;
+    }
+
+    // LEAVE
+    case 0xC9:
+      if (!cpu.use32 && opSize === 16) {
+        cpu.setReg16(ESP, cpu.getReg16(EBP));
+        cpu.setReg16(EBP, cpu.pop16());
+      } else {
+        cpu.reg[ESP] = cpu.reg[EBP];
+        cpu.reg[EBP] = cpu.pop32() | 0;
+      }
+      break;
+
+    // INT 3
+    case 0xCC:
+      console.warn(`INT 3 at 0x${((cpu.eip - 1) >>> 0).toString(16)}`);
+      break;
+
+    // INT imm8
+    case 0xCD: {
+      const num = cpu.fetch8();
+      // Try DOS/BIOS handler first if emulator is available
+      if (cpu.emu && handleDosInt(cpu, num, cpu.emu)) {
+        break;
+      }
+      if (num === 0x03) {
+        // INT 3: breakpoint — treat as NOP
+      } else {
+        console.warn(`INT 0x${num.toString(16)} at 0x${((cpu.eip - 2) >>> 0).toString(16)}`);
+      }
+      break;
+    }
+
+    // IRET (0xCF) — return from interrupt
+    case 0xCF: {
+      if (!cpu.use32) {
+        const ip = cpu.pop16();
+        const cs = cpu.pop16();
+        const flags = cpu.pop16();
+        cpu.cs = cs;
+        cpu.eip = cpu.segBase(cs) + ip;
+        cpu.setFlags((cpu.getFlags() & 0xFFFF0000) | (flags & 0xFFFF));
+      } else {
+        const eip2 = cpu.pop32() >>> 0;
+        const cs2 = cpu.pop32() & 0xFFFF;
+        const eflags = cpu.pop32() >>> 0;
+        cpu.cs = cs2;
+        cpu.eip = eip2;
+        cpu.setFlags(eflags);
+      }
+      break;
+    }
+
+    // Shift/Rotate r/m8, 1 (0xD0)
+    case 0xD0: {
+      const d = cpu.decodeModRM(8);
+      cpu.writeModRM(d, doShift(cpu, d.regField, d.val, 1, 8), 8);
+      break;
+    }
+
+    // Shift/Rotate r/m32, 1 (0xD1)
+    case 0xD1: {
+      const d = cpu.decodeModRM(opSize);
+      cpu.writeModRM(d, doShift(cpu, d.regField, d.val, 1, opSize as 8 | 16 | 32), opSize);
+      break;
+    }
+
+    // Shift/Rotate r/m8, CL (0xD2)
+    case 0xD2: {
+      const d = cpu.decodeModRM(8);
+      const count = cpu.getReg8(ECX) & 0x1F;
+      if (count) cpu.writeModRM(d, doShift(cpu, d.regField, d.val, count, 8), 8);
+      break;
+    }
+
+    // Shift/Rotate r/m32, CL (0xD3)
+    case 0xD3: {
+      const d = cpu.decodeModRM(opSize);
+      const count = cpu.getReg8(ECX) & 0x1F;
+      if (count) cpu.writeModRM(d, doShift(cpu, d.regField, d.val, count, opSize as 8 | 16 | 32), opSize);
+      break;
+    }
+
+    // CALL rel16/32
+    case 0xE8: {
+      if (opSize === 16) {
+        const disp = (cpu.fetch16() << 16 >> 16);
+        if (!cpu.use32) {
+          const csBase = cpu.segBase(cpu.cs);
+          cpu.push16((cpu.eip - csBase) & 0xFFFF);
+          cpu.eip = csBase + (((cpu.eip - csBase) + disp) & 0xFFFF);
+        } else {
+          cpu.push32(cpu.eip);
+          cpu.eip = (cpu.eip + disp) | 0;
+        }
+      } else {
+        const disp = cpu.fetchI32();
+        cpu.push32(cpu.eip);
+        cpu.eip = (cpu.eip + disp) | 0;
+      }
+      break;
+    }
+
+    // JMP rel16/32
+    case 0xE9: {
+      if (opSize === 16) {
+        const disp = (cpu.fetch16() << 16 >> 16);
+        if (!cpu.use32) {
+          const csBase = cpu.segBase(cpu.cs);
+          cpu.eip = csBase + (((cpu.eip - csBase) + disp) & 0xFFFF);
+        } else {
+          cpu.eip = (cpu.eip + disp) | 0;
+        }
+      } else {
+        const disp = cpu.fetchI32();
+        cpu.eip = (cpu.eip + disp) | 0;
+      }
+      break;
+    }
+
+    // JMP FAR ptr16:16/32
+    case 0xEA: {
+      if (!cpu.use32) {
+        const offset = cpu.fetch16();
+        const selector = cpu.fetch16();
+        cpu.cs = selector;
+        cpu.eip = (cpu.segBase(selector)) + offset;
+      } else {
+        const offset = opSize === 16 ? cpu.fetch16() : cpu.fetch32();
+        cpu.fetch16(); // segment selector — consumed and ignored in flat model
+        cpu.eip = offset;
+      }
+      break;
+    }
+
+    // JMP rel8
+    case 0xEB: {
+      const disp = cpu.fetchI8();
+      if (!cpu.use32) {
+        const csBase = cpu.segBase(cpu.cs);
+        cpu.eip = csBase + (((cpu.eip - csBase) + disp) & 0xFFFF);
+      } else {
+        cpu.eip = (cpu.eip + disp) | 0;
+      }
+      break;
+    }
+
+    // IN AL, imm8 / IN AX, imm8
+    case 0xE4: {
+      const port = cpu.fetch8();
+      cpu.setReg8(EAX, cpu.emu?.portIn(port) ?? 0xFF);
+      break;
+    }
+    case 0xE5:
+      cpu.fetch8(); // port number
+      if (opSize === 16) cpu.setReg16(EAX, 0xFFFF);
+      else cpu.reg[EAX] = 0xFFFFFFFF;
+      break;
+
+    // OUT imm8, AL / OUT imm8, AX
+    case 0xE6:
+      cpu.fetch8(); // port number — ignore
+      break;
+    case 0xE7:
+      cpu.fetch8(); // port number — ignore
+      break;
+
+    // IN AL, DX / IN AX, DX
+    case 0xEC:
+      cpu.setReg8(EAX, cpu.emu?.portIn(cpu.getReg16(EDX)) ?? 0xFF);
+      break;
+    case 0xED:
+      if (opSize === 16) cpu.setReg16(EAX, 0xFFFF);
+      else cpu.reg[EAX] = 0xFFFFFFFF;
+      break;
+
+    // OUT DX, AL / OUT DX, AX
+    case 0xEE: case 0xEF:
+      break; // ignore
+
+    // LOCK prefix (ignore)
+    case 0xF0:
+      cpu.step();
+      break;
+
+    // CMC - Complement Carry Flag
+    case 0xF5:
+      cpu.materializeFlags();
+      cpu.flagsCache ^= CF;
+      break;
+
+    // CLC - Clear Carry Flag
+    case 0xF8:
+      cpu.materializeFlags();
+      cpu.flagsCache &= ~CF;
+      break;
+
+    // STC - Set Carry Flag
+    case 0xF9:
+      cpu.materializeFlags();
+      cpu.flagsCache |= CF;
+      break;
+
+    // CLI / STI (no-op in emulator)
+    case 0xFA: case 0xFB:
+      break;
+
+    // CLD
+    case 0xFC:
+      cpu.flagsCache &= ~DF;
+      break;
+
+    // STD
+    case 0xFD:
+      cpu.flagsCache |= DF;
+      break;
+
+    // Group 3 (0xF6): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m8
+    case 0xF6: {
+      const d = cpu.decodeModRM(8);
+      switch (d.regField) {
+        case 0: case 1: { // TEST r/m8, imm8
+          const imm = cpu.fetch8();
+          cpu.setLazy(LazyOp.AND8, d.val & imm, d.val, imm);
+          break;
+        }
+        case 2: // NOT r/m8
+          cpu.writeModRM(d, ~d.val & 0xFF, 8);
+          break;
+        case 3: { // NEG r/m8
+          const result = (-d.val) & 0xFF;
+          cpu.writeModRM(d, result, 8);
+          cpu.setLazy(LazyOp.NEG8, result, d.val, 0);
+          break;
+        }
+        case 4: { // MUL r/m8
+          const ax = (cpu.getReg8(EAX) & 0xFF) * (d.val & 0xFF);
+          cpu.setReg16(EAX, ax & 0xFFFF);
+          const of = (ax & 0xFF00) !== 0;
+          cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          break;
+        }
+        case 5: { // IMUL r/m8
+          const ax = ((cpu.getReg8(EAX) << 24 >> 24)) * ((d.val << 24 >> 24));
+          cpu.setReg16(EAX, ax & 0xFFFF);
+          const of = ax < -128 || ax > 127;
+          cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          break;
+        }
+        case 6: { // DIV r/m8
+          const dividend = cpu.getReg16(EAX);
+          const divisor = d.val & 0xFF;
+          if (divisor === 0) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+          const quot = (dividend / divisor) >>> 0;
+          const rem = dividend % divisor;
+          cpu.setReg8(EAX, quot & 0xFF);
+          cpu.setReg8(4, rem & 0xFF); // AH
+          break;
+        }
+        case 7: { // IDIV r/m8
+          const dividend = cpu.getReg16(EAX) << 16 >> 16;
+          const divisor = d.val << 24 >> 24;
+          if (divisor === 0) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+          const quot = (dividend / divisor) | 0;
+          const rem = dividend - quot * divisor;
+          cpu.setReg8(EAX, quot & 0xFF);
+          cpu.setReg8(4, rem & 0xFF);
+          break;
+        }
+      }
+      break;
+    }
+
+    // Group 3 (0xF7): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m32
+    case 0xF7: {
+      const d = cpu.decodeModRM(opSize);
+      switch (d.regField) {
+        case 0: case 1: { // TEST r/m32, imm32
+          if (opSize === 16) {
+            const imm = cpu.fetch16();
+            cpu.setLazy(LazyOp.AND16, d.val & imm, d.val, imm);
+          } else {
+            const imm = cpu.fetch32();
+            cpu.setLazy(LazyOp.AND32, (d.val & imm) | 0, d.val, imm);
+          }
+          break;
+        }
+        case 2: // NOT
+          if (opSize === 16) cpu.writeModRM(d, ~d.val & 0xFFFF, 16);
+          else cpu.writeModRM(d, ~d.val, 32);
+          break;
+        case 3: { // NEG
+          if (opSize === 16) {
+            const result = (-d.val) & 0xFFFF;
+            cpu.writeModRM(d, result, 16);
+            cpu.setLazy(LazyOp.NEG16, result, d.val, 0);
+          } else {
+            const result = (-d.val) | 0;
+            cpu.writeModRM(d, result, 32);
+            cpu.setLazy(LazyOp.NEG32, result, d.val, 0);
+          }
+          break;
+        }
+        case 4: { // MUL r/m32
+          if (opSize === 16) {
+            const result = (cpu.getReg16(EAX) & 0xFFFF) * (d.val & 0xFFFF);
+            cpu.setReg16(EAX, result & 0xFFFF);
+            cpu.setReg16(EDX, (result >> 16) & 0xFFFF);
+            const of = (result >> 16) !== 0;
+            cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          } else {
+            const a = cpu.reg[EAX] >>> 0;
+            const b = d.val >>> 0;
+            const lo = Math.imul(a, b) >>> 0;
+            const hi = Number(BigInt(a) * BigInt(b) >> 32n) >>> 0;
+            cpu.reg[EAX] = lo | 0;
+            cpu.reg[EDX] = hi | 0;
+            const of = hi !== 0;
+            cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          }
+          break;
+        }
+        case 5: { // IMUL r/m32
+          if (opSize === 16) {
+            const result = (d.val << 16 >> 16) * (cpu.getReg16(EAX) << 16 >> 16);
+            cpu.setReg16(EAX, result & 0xFFFF);
+            cpu.setReg16(EDX, (result >> 16) & 0xFFFF);
+            const truncated = (result << 16) >> 16;
+            const of = truncated !== result;
+            cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          } else {
+            const a = cpu.reg[EAX] | 0;
+            const b = d.val | 0;
+            const r64 = BigInt(a) * BigInt(b);
+            cpu.reg[EAX] = Number(r64 & 0xFFFFFFFFn) | 0;
+            cpu.reg[EDX] = Number((r64 >> 32n) & 0xFFFFFFFFn) | 0;
+            const of = r64 !== BigInt(cpu.reg[EAX]);
+            cpu.setFlags((cpu.getFlags() & ~(CF | OF)) | (of ? CF | OF : 0));
+          }
+          break;
+        }
+        case 6: { // DIV r/m32
+          if (opSize === 16) {
+            const dividend = ((cpu.getReg16(EDX) & 0xFFFF) << 16) | (cpu.getReg16(EAX) & 0xFFFF);
+            const divisor = d.val & 0xFFFF;
+            if (divisor === 0) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+            const quot = (dividend >>> 0) / divisor >>> 0;
+            const rem = (dividend >>> 0) % divisor;
+            cpu.setReg16(EAX, quot & 0xFFFF);
+            cpu.setReg16(EDX, rem & 0xFFFF);
+          } else {
+            const dividend = (BigInt(cpu.reg[EDX] >>> 0) << 32n) | BigInt(cpu.reg[EAX] >>> 0);
+            const divisor = BigInt(d.val >>> 0);
+            if (divisor === 0n) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+            const quot = dividend / divisor;
+            const rem = dividend % divisor;
+            cpu.reg[EAX] = Number(quot & 0xFFFFFFFFn) | 0;
+            cpu.reg[EDX] = Number(rem & 0xFFFFFFFFn) | 0;
+          }
+          break;
+        }
+        case 7: { // IDIV r/m32
+          if (opSize === 16) {
+            const dividend = ((cpu.getReg16(EDX) << 16) | (cpu.getReg16(EAX) & 0xFFFF)) | 0;
+            const divisor = d.val << 16 >> 16;
+            if (divisor === 0) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+            const quot = (dividend / divisor) | 0;
+            const rem = dividend - quot * divisor;
+            cpu.setReg16(EAX, quot & 0xFFFF);
+            cpu.setReg16(EDX, rem & 0xFFFF);
+          } else {
+            const dividend = (BigInt(cpu.reg[EDX] | 0) << 32n) | BigInt(cpu.reg[EAX] >>> 0);
+            const divisor = BigInt(d.val | 0);
+            if (divisor === 0n) { cpu.haltReason = 'integer divide by zero'; cpu.halted = true; break; }
+            const quot = dividend / divisor;
+            const rem = dividend - quot * divisor;
+            cpu.reg[EAX] = Number(BigInt.asIntN(32, quot)) | 0;
+            cpu.reg[EDX] = Number(BigInt.asIntN(32, rem)) | 0;
+          }
+          break;
+        }
+      }
+      break;
+    }
+
+    // Group 4/5 (0xFE/0xFF)
+    case 0xFE: {
+      const d = cpu.decodeModRM(8);
+      if (d.regField === 0) {
+        const result = (d.val + 1) & 0xFF;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF8i = cpu.flagsCache & DF;
+        cpu.writeModRM(d, result, 8);
+        cpu.setLazy(LazyOp.INC8, result, 0, 0);
+        cpu.flagsCache = savedCF | savedDF8i;
+      } else if (d.regField === 1) {
+        const result = (d.val - 1) & 0xFF;
+        const savedCF = cpu.getFlag(CF) ? CF : 0;
+        const savedDF8d = cpu.flagsCache & DF;
+        cpu.writeModRM(d, result, 8);
+        cpu.setLazy(LazyOp.DEC8, result, 0, 0);
+        cpu.flagsCache = savedCF | savedDF8d;
+      }
+      break;
+    }
+
+    case 0xFF: {
+      const d = cpu.decodeModRM(opSize);
+      switch (d.regField) {
+        case 0: { // INC r/m32
+          if (opSize === 16) {
+            const result = (d.val + 1) & 0xFFFF;
+            const savedCF = cpu.getFlag(CF) ? CF : 0;
+            const savedDFi16 = cpu.flagsCache & DF;
+            cpu.writeModRM(d, result, 16);
+            cpu.setLazy(LazyOp.INC16, result, 0, 0);
+            cpu.flagsCache = savedCF | savedDFi16;
+          } else {
+            const result = (d.val + 1) | 0;
+            const savedCF = cpu.getFlag(CF) ? CF : 0;
+            const savedDFi32 = cpu.flagsCache & DF;
+            cpu.writeModRM(d, result, 32);
+            cpu.setLazy(LazyOp.INC32, result, 0, 0);
+            cpu.flagsCache = savedCF | savedDFi32;
+          }
+          break;
+        }
+        case 1: { // DEC r/m32
+          if (opSize === 16) {
+            const result = (d.val - 1) & 0xFFFF;
+            const savedCF = cpu.getFlag(CF) ? CF : 0;
+            const savedDFd16 = cpu.flagsCache & DF;
+            cpu.writeModRM(d, result, 16);
+            cpu.setLazy(LazyOp.DEC16, result, 0, 0);
+            cpu.flagsCache = savedCF | savedDFd16;
+          } else {
+            const result = (d.val - 1) | 0;
+            const savedCF = cpu.getFlag(CF) ? CF : 0;
+            const savedDFd32 = cpu.flagsCache & DF;
+            cpu.writeModRM(d, result, 32);
+            cpu.setLazy(LazyOp.DEC32, result, 0, 0);
+            cpu.flagsCache = savedCF | savedDFd32;
+          }
+          break;
+        }
+        case 2: // CALL r/m16/32
+          if (!cpu.use32 && opSize === 16) {
+            const csBase = cpu.segBase(cpu.cs);
+            cpu.push16((cpu.eip - csBase) & 0xFFFF);
+            cpu.eip = csBase + (d.val & 0xFFFF);
+          } else {
+            cpu.push32(cpu.eip);
+            cpu.eip = d.val | 0;
+          }
+          break;
+        case 3: // CALL FAR m16:16 (FF /3)
+          if (!cpu.use32) {
+            const farOff = d.val & 0xFFFF;
+            const farSel = cpu.mem.readU16((d.addr + 2) >>> 0);
+            const csBase = cpu.segBase(cpu.cs);
+            cpu.push16(cpu.cs);
+            cpu.push16((cpu.eip - csBase) & 0xFFFF);
+            cpu.cs = farSel;
+            cpu.eip = (cpu.segBase(farSel)) + farOff;
+          }
+          break;
+        case 4: // JMP r/m16/32
+          if (!cpu.use32 && opSize === 16) {
+            const csBase = cpu.segBase(cpu.cs);
+            cpu.eip = csBase + (d.val & 0xFFFF);
+          } else {
+            cpu.eip = d.val | 0;
+          }
+          break;
+        case 5: // JMP FAR m16:16 (FF /5)
+          if (!cpu.use32) {
+            const farOff = d.val & 0xFFFF;
+            const farSel = cpu.mem.readU16((d.addr + 2) >>> 0);
+            cpu.cs = farSel;
+            cpu.eip = (cpu.segBase(farSel)) + farOff;
+          }
+          break;
+        case 6: // PUSH r/m32
+          if (opSize === 16) cpu.push16(d.val);
+          else cpu.push32(d.val);
+          break;
+        default:
+          console.warn(`Unimplemented FF /${d.regField} at 0x${((cpu.eip) >>> 0).toString(16)}`);
+          cpu.haltReason = 'illegal instruction';
+          cpu.halted = true;
+          break;
+      }
+      break;
+    }
+
+    // 0F prefix
+    case 0x0F:
+      exec0F(cpu, opSize, prefixF3, prefixF2);
+      break;
+
+    // LOOP
+    case 0xE0: { // LOOPNE
+      const disp = cpu.fetchI8();
+      cpu.reg[ECX] = (cpu.reg[ECX] - 1) | 0;
+      if (cpu.reg[ECX] !== 0 && !cpu.getFlag(ZF)) cpu.eip = (cpu.eip + disp) | 0;
+      break;
+    }
+    case 0xE1: { // LOOPE
+      const disp = cpu.fetchI8();
+      cpu.reg[ECX] = (cpu.reg[ECX] - 1) | 0;
+      if (cpu.reg[ECX] !== 0 && cpu.getFlag(ZF)) cpu.eip = (cpu.eip + disp) | 0;
+      break;
+    }
+    case 0xE2: { // LOOP
+      const disp = cpu.fetchI8();
+      cpu.reg[ECX] = (cpu.reg[ECX] - 1) | 0;
+      if (cpu.reg[ECX] !== 0) cpu.eip = (cpu.eip + disp) | 0;
+      break;
+    }
+
+    // JECXZ rel8
+    case 0xE3: {
+      const disp = cpu.fetchI8();
+      if (cpu.reg[ECX] === 0) cpu.eip = (cpu.eip + disp) | 0;
+      break;
+    }
+
+    // AAM imm8 — AH=AL/imm, AL=AL%imm
+    case 0xD4: {
+      const base = cpu.fetch8();
+      if (base === 0) { console.warn('[AAM] divide by zero'); break; }
+      const al = cpu.getReg8(EAX);
+      cpu.setReg8(EAX + 4, Math.floor(al / base) & 0xFF); // AH
+      cpu.setReg8(EAX, (al % base) & 0xFF); // AL
+      cpu.setLazy(LazyOp.AND8, cpu.getReg8(EAX), cpu.getReg8(EAX), cpu.getReg8(EAX)); // set flags from AL
+      break;
+    }
+
+    // AAD imm8 — AL = AH*imm + AL, AH = 0
+    case 0xD5: {
+      const base = cpu.fetch8();
+      const al = cpu.getReg8(EAX);
+      const ah = cpu.getReg8(EAX + 4); // AH
+      const result = ((ah * base) + al) & 0xFF;
+      cpu.setReg8(EAX, result); // AL
+      cpu.setReg8(EAX + 4, 0); // AH = 0
+      cpu.setLazy(LazyOp.AND8, result, result, result);
+      break;
+    }
+
+    // XLAT — AL = [DS:BX+AL]
+    case 0xD7: {
+      const al = cpu.getReg8(EAX);
+      const bx = cpu.getReg16(EBX);
+      const segSel = cpu._segOverride ? cpu.getSegOverrideSel() : cpu.ds;
+      const addr = (cpu.segBase(segSel) + ((bx + al) & 0xFFFF)) >>> 0;
+      cpu.setReg8(EAX, cpu.mem.readU8(addr));
+      break;
+    }
+
+    // x87 FPU escape opcodes
+    case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+    case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+      execFPU(cpu, opcode);
+      break;
+
+    // DAA / DAS — BCD adjust after add/subtract
+    case 0x27: case 0x2F: {
+      let al = cpu.reg[EAX] & 0xFF;
+      const oldAL = al;
+      const oldCF = cpu.getFlag(CF);
+      let cf = false;
+      if ((al & 0x0F) > 9 || cpu.getFlag(0x10 /* AF */)) {
+        al = opcode === 0x27 ? (al + 6) & 0xFF : (al - 6) & 0xFF;
+        cf = oldCF || ((opcode === 0x27 ? (oldAL + 6) : (oldAL - 6)) > 0xFF);
+        cpu.setFlag(0x10 /* AF */, true);
+      } else {
+        cpu.setFlag(0x10 /* AF */, false);
+      }
+      if (oldAL > 0x99 || oldCF) {
+        al = opcode === 0x27 ? (al + 0x60) & 0xFF : (al - 0x60) & 0xFF;
+        cf = true;
+      }
+      cpu.setReg8(EAX, al);
+      cpu.setFlag(CF, cf);
+      cpu.setFlag(ZF, al === 0);
+      cpu.setFlag(0x80 /* SF */, !!(al & 0x80));
+      // PF = set if even number of set bits in low byte
+      let bits = al; bits ^= bits >> 4; bits ^= bits >> 2; bits ^= bits >> 1;
+      cpu.setFlag(0x04 /* PF */, !(bits & 1));
+      break;
+    }
+
+    // ARPL — invalid in real mode, triggers #UD (INT 6)
+    case 0x63: {
+      if (cpu.realMode && cpu.emu) {
+        // Point EIP at the ARPL opcode for the exception handler
+        cpu.eip--;
+        handleDosInt(cpu, 0x06, cpu.emu);
+      }
+      break;
+    }
+
+    // HLT — halt until next interrupt (yield current tick, resume on next)
+    case 0xF4:
+      if (cpu.emu && cpu.emu.isDOS) {
+        // DOS: just end current tick; timer INT 08h will fire on next tick
+        cpu.emu._dosHalted = true;
+      } else if (cpu.emu) {
+        cpu.emu.waitingForMessage = true;
+      }
+      break;
+
+    // AAA / AAS — ASCII adjust after add/subtract
+    case 0x37: case 0x3F: {
+      let al = cpu.reg[EAX] & 0xFF;
+      let ah = (cpu.reg[EAX] >> 8) & 0xFF;
+      if ((al & 0x0F) > 9 || cpu.getFlag(0x10 /* AF */)) {
+        if (opcode === 0x37) { al = (al + 6) & 0xFF; ah = (ah + 1) & 0xFF; }
+        else { al = (al - 6) & 0xFF; ah = (ah - 1) & 0xFF; }
+        cpu.setFlag(0x10 /* AF */, true);
+        cpu.setFlag(CF, true);
+      } else {
+        cpu.setFlag(0x10 /* AF */, false);
+        cpu.setFlag(CF, false);
+      }
+      al &= 0x0F;
+      cpu.setReg16(EAX, (ah << 8) | al);
+      break;
+    }
+
+    default: {
+      const faultEip = (cpu.eip - 1) >>> 0;
+      const bytes: string[] = [];
+      for (let j = -4; j < 16; j++) bytes.push(cpu.mem.readU8((faultEip + j) >>> 0).toString(16).padStart(2, '0'));
+      console.warn(
+        `Unimplemented opcode 0x${opcode.toString(16).padStart(2, '0')} at EIP=0x${faultEip.toString(16)}\n` +
+        `  bytes@EIP-4: [${bytes.join(' ')}]\n` +
+        `  EAX=0x${(cpu.reg[EAX] >>> 0).toString(16)} ECX=0x${(cpu.reg[ECX] >>> 0).toString(16)} EDX=0x${(cpu.reg[EDX] >>> 0).toString(16)} EBX=0x${(cpu.reg[EBX] >>> 0).toString(16)}\n` +
+        `  ESP=0x${(cpu.reg[ESP] >>> 0).toString(16)} EBP=0x${(cpu.reg[EBP] >>> 0).toString(16)} ESI=0x${(cpu.reg[ESI] >>> 0).toString(16)} EDI=0x${(cpu.reg[EDI] >>> 0).toString(16)}`
+      );
+      cpu.haltReason = 'illegal instruction';
+      cpu.halted = true;
+      break;
+    }
+  }
+}

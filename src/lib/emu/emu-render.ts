@@ -1,0 +1,214 @@
+import type { Emulator, ControlOverlay } from './emulator';
+import type { WindowInfo } from './win32/user32/index';
+import type { BrushInfo } from './win32/gdi32/types';
+import { renderButton, renderStatic, renderEdit } from './emu-render-controls';
+
+const WM_CTLCOLORSTATIC = 0x0138;
+
+/** Send WM_CTLCOLORSTATIC to parent and return CSS color string if a valid brush is returned */
+function getCtlColorStatic(emu: Emulator, child: WindowInfo, childHwnd: number): string | undefined {
+  const parentWnd = emu.handles.get<WindowInfo>(child.parent);
+  if (!parentWnd?.wndProc) return undefined;
+  // wParam = HDC (use 0 as placeholder), lParam = child window handle
+  const result = emu.callWndProc(parentWnd.wndProc, child.parent, WM_CTLCOLORSTATIC, 0, childHwnd);
+  if (!result) return undefined;
+  // For dialog procs: return value is TRUE, actual brush is in DWL_MSGRESULT (extraBytes[0..3])
+  let hBrush = result;
+  if (result === 1 && parentWnd.extraBytes && parentWnd.extraBytes.length >= 4) {
+    const msgResult = parentWnd.extraBytes[0] | (parentWnd.extraBytes[1] << 8) |
+      (parentWnd.extraBytes[2] << 16) | (parentWnd.extraBytes[3] << 24);
+    if (msgResult) hBrush = msgResult >>> 0;
+  }
+  const brush = emu.getBrush(hBrush);
+  if (brush && !brush.isNull) {
+    const r = brush.color & 0xFF, g = (brush.color >> 8) & 0xFF, b = (brush.color >> 16) & 0xFF;
+    return `rgb(${r},${g},${b})`;
+  }
+  return undefined;
+}
+
+/**
+ * Draw text with anti-aliasing using the browser's native text rendering.
+ */
+export function fillTextBitmap(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  text: string, x: number, y: number, maxWidth?: number,
+): void {
+  if (!text) return;
+  if (maxWidth !== undefined) {
+    ctx.fillText(text, x, y, maxWidth);
+  } else {
+    ctx.fillText(text, x, y);
+  }
+}
+
+/** Lightweight overlay-only update: sends control overlay data to Preact without triggering WM_PAINT */
+export function notifyControlOverlays(emu: Emulator): void {
+  const wnd = emu.handles.get<WindowInfo>(emu.mainWindow);
+  if (!wnd?.childList || !emu.onControlsChanged) return;
+  const allChildren: { hwnd: number; info: WindowInfo; ox: number; oy: number }[] = [];
+  collectChildren(emu, wnd, 0, 0, allChildren);
+  const overlays = buildOverlays(emu, allChildren);
+  if (overlays.length > 0) {
+    emu.onControlsChanged(overlays);
+  }
+}
+
+const DOM_CLASSES = ['BUTTON', 'EDIT', 'STATIC', 'LISTBOX', 'COMBOBOX', 'SCROLLBAR', 'MSCTLS_TRACKBAR32', 'MSCTLS_PROGRESS32', 'MSCTLS_HOTKEY32', 'RICHEDIT20W', 'RICHEDIT20A', 'RICHEDIT', 'SYSTABCONTROL32', 'SYSLISTVIEW32', 'MSCTLS_STATUSBAR32', 'SYSTREEVIEW32'];
+
+function buildOverlays(emu: Emulator, allChildren: { hwnd: number; info: WindowInfo; ox: number; oy: number }[]): ControlOverlay[] {
+  const overlays: ControlOverlay[] = [];
+  for (const { hwnd: childHwnd, info: child, ox, oy } of allChildren) {
+    const controlId = child.controlId ?? 0;
+    const cn = child.classInfo.className.toUpperCase();
+    if (cn === '#32770') continue;
+    if (child.wndProc && !DOM_CLASSES.includes(cn) && !child.classInfo.baseClassName) continue;
+    const overlay: ControlOverlay = {
+      controlId, childHwnd,
+      className: cn,
+      baseClassName: child.classInfo.baseClassName,
+      x: child.x + ox, y: child.y + oy, width: child.width, height: child.height,
+      style: child.style, exStyle: child.exStyle, title: child.title,
+      checked: child.checked ?? 0,
+      fontHeight: child.hFont ? (emu.handles.get<{ height: number }>(child.hFont)?.height ?? 0) : 0,
+      trackPos: child.trackPos ?? 0,
+      trackMin: child.trackMin ?? 0,
+      trackMax: child.trackMax ?? 100,
+    };
+    if (cn === 'STATIC') {
+      const bg = getCtlColorStatic(emu, child, childHwnd);
+      if (bg) overlay.bgColor = bg;
+    }
+    if (child.treeItems) overlay.treeItems = Array.from(child.treeItems.values());
+    if (child.treeSelectedItem !== undefined) overlay.treeSelectedItem = child.treeSelectedItem;
+    if (child.treeImageList) {
+      const il = emu.handles.get<{ images: (string | undefined)[] }>(child.treeImageList);
+      if (il?.images) overlay.treeImageUrls = il.images;
+    }
+    if (child.lbItems) overlay.lbItems = child.lbItems;
+    if (child.lbSelectedIndex !== undefined) overlay.lbSelectedIndex = child.lbSelectedIndex;
+    if (child.lbSelectedIndices) overlay.lbSelectedIndices = Array.from(child.lbSelectedIndices);
+    if (child.cbItems) overlay.cbItems = child.cbItems;
+    if (child.cbSelectedIndex !== undefined) overlay.cbSelectedIndex = child.cbSelectedIndex;
+    if (child.listColumns) overlay.listColumns = child.listColumns;
+    if (child.listItems) overlay.listItems = child.listItems;
+    if (child.statusTexts) overlay.statusTexts = child.statusTexts;
+    if (child.tabItems) overlay.tabItems = child.tabItems;
+    if (child.tabSelectedIndex !== undefined) overlay.tabSelectedIndex = child.tabSelectedIndex;
+    overlays.push(overlay);
+  }
+  return overlays;
+}
+
+/** Recursively collect all visible children from a window and its child dialogs */
+function collectChildren(emu: Emulator, wnd: WindowInfo, offsetX: number, offsetY: number, out: { hwnd: number; info: WindowInfo; ox: number; oy: number }[]): void {
+  if (!wnd.childList) return;
+  for (const childHwnd of wnd.childList) {
+    const child = emu.handles.get<WindowInfo>(childHwnd);
+    if (!child || !child.visible) continue;
+    out.push({ hwnd: childHwnd, info: child, ox: offsetX, oy: offsetY });
+    // Recurse into child dialogs (e.g. tab pages) that have their own children
+    if (child.childList && child.childList.length > 0) {
+      collectChildren(emu, child, offsetX + child.x, offsetY + child.y, out);
+    }
+  }
+}
+
+export function renderChildControls(emu: Emulator, hwnd: number): void {
+  const wnd = emu.handles.get<WindowInfo>(hwnd);
+  if (!wnd?.childList || hwnd !== emu.mainWindow) return;
+  const ctx = emu.canvasCtx;
+  if (!ctx) return;
+
+  const allChildren: { hwnd: number; info: WindowInfo; ox: number; oy: number }[] = [];
+  collectChildren(emu, wnd, 0, 0, allChildren);
+
+  // Notify overlays synchronously BEFORE custom draw so Preact renders
+  // CompanionCanvas elements and sets wnd.domCanvas via ref callbacks.
+  // This ensures sendDrawItem can draw directly to the companion canvas.
+  if (emu.onControlsChanged) {
+    const overlays = buildOverlays(emu, allChildren);
+    if (overlays.length > 0) {
+      emu.onControlsChanged(overlays);
+    }
+  }
+
+  for (const { hwnd: childHwnd, info: child } of allChildren) {
+    const controlId = child.controlId ?? 0;
+    const className = child.classInfo.className.toUpperCase();
+    const bsType = child.style & 0xF;
+    // Only canvas-render BS_OWNERDRAW buttons; all others rendered as DOM
+    if (className === 'BUTTON' && bsType === 0xB) {
+      if (child.domCanvas) {
+        // Companion canvas: clear to transparent; the DOM Button component provides the base visual
+        const cctx = child.domCanvas.getContext('2d');
+        if (cctx) cctx.clearRect(0, 0, child.width, child.height);
+      } else {
+        renderControl(emu, ctx, child);
+      }
+      if (wnd.wndProc) {
+        sendDrawItem(emu, hwnd, wnd, child, childHwnd, controlId);
+      }
+    }
+    // Custom-class child controls with their own wndProc: send WM_PAINT
+    if (child.wndProc && !['BUTTON', 'EDIT', 'STATIC', 'LISTBOX', 'COMBOBOX', 'SCROLLBAR', 'RICHEDIT20W', 'RICHEDIT20A', 'RICHEDIT'].includes(className)) {
+      child.needsPaint = true;
+      emu.callWndProc(child.wndProc, childHwnd, 0x000F, 0, 0); // WM_PAINT
+      child.needsPaint = false;
+    }
+  }
+}
+
+function sendDrawItem(emu: Emulator, parentHwnd: number, parentWnd: WindowInfo, child: WindowInfo, childHwnd: number, controlId: number): void {
+  if (!emu.drawItemStructAddr) {
+    emu.drawItemStructAddr = emu.allocHeap(48);
+  }
+  const addr = emu.drawItemStructAddr;
+
+  // If the child has a companion canvas, draw directly to it (no translate needed).
+  // Otherwise fall back to parent's DC with translate.
+  const useDomCanvas = !!child.domCanvas;
+  const hdc = useDomCanvas ? emu.getWindowDC(childHwnd) : emu.getWindowDC(parentHwnd);
+
+  const dc = emu.getDC(hdc);
+  if (dc && !useDomCanvas) {
+    // Apply translate so drawing at (0,0) maps to (child.x, child.y) on canvas
+    dc.ctx.save();
+    dc.ctx.translate(child.x, child.y);
+  }
+
+  emu.memory.writeU32(addr + 0,  4);           // CtlType = ODT_BUTTON
+  emu.memory.writeU32(addr + 4,  controlId);   // CtlID
+  emu.memory.writeU32(addr + 8,  0);           // itemID
+  emu.memory.writeU32(addr + 12, 1);           // itemAction = ODA_DRAWENTIRE
+  emu.memory.writeU32(addr + 16, (child.style & 0x08000000) ? 0x4 : 0); // itemState: ODS_DISABLED if WS_DISABLED
+  emu.memory.writeU32(addr + 20, childHwnd);   // hwndItem
+  emu.memory.writeU32(addr + 24, hdc);         // hDC
+  emu.memory.writeU32(addr + 28, 0);           // rcItem.left
+  emu.memory.writeU32(addr + 32, 0);           // rcItem.top
+  emu.memory.writeU32(addr + 36, child.width); // rcItem.right
+  emu.memory.writeU32(addr + 40, child.height);// rcItem.bottom
+  emu.memory.writeU32(addr + 44, 0);           // itemData
+
+  emu.callWndProc(parentWnd.wndProc, parentHwnd, 0x002B, controlId, addr);
+
+  // Restore DC transform
+  if (dc && !useDomCanvas) {
+    dc.ctx.restore();
+  }
+}
+
+function renderControl(emu: Emulator, ctx: CanvasRenderingContext2D, child: WindowInfo): void {
+  const className = child.classInfo.className.toUpperCase();
+  switch (className) {
+    case 'BUTTON':
+      renderButton(ctx, child);
+      break;
+    case 'STATIC':
+      renderStatic(ctx, child, emu);
+      break;
+    case 'EDIT':
+      renderEdit(ctx, child);
+      break;
+  }
+}

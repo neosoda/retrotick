@@ -1,0 +1,9 @@
+export { registerWin16Kernel } from './kernel';
+export { registerWin16User } from './user/index';
+export { registerWin16Gdi } from './gdi';
+export { registerWin16Shell } from './shell';
+export { registerWin16Ddeml } from './ddeml';
+export { registerWin16Mmsystem } from './mmsystem';
+export { registerWin16Commdlg } from './commdlg';
+export { registerWin16Keyboard } from './keyboard';
+export { registerWin16Win87em } from './win87em';

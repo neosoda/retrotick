@@ -1,0 +1,528 @@
+import type { Emulator } from '../emulator';
+
+// DirectDraw COM interface emulation
+// IDirectDraw7 vtable offsets (each method = 4 bytes)
+// 0x00 QueryInterface, 0x04 AddRef, 0x08 Release
+// 0x0C Compact, 0x10 CreateClipper, 0x14 CreatePalette, 0x18 CreateSurface
+// 0x1C DuplicateSurface, 0x20 EnumDisplayModes, 0x24 EnumSurfaces
+// 0x28 FlipToGDISurface, 0x2C GetCaps, 0x30 GetDisplayMode
+// 0x34 GetFourCCCodes, 0x38 GetGDISurface, 0x3C GetMonitorFrequency
+// 0x40 GetScanLine, 0x44 GetVerticalBlankStatus, 0x48 Initialize
+// 0x4C RestoreDisplayMode, 0x50 SetCooperativeLevel, 0x54 SetDisplayMode
+// 0x58 WaitForVerticalBlank, 0x5C GetAvailableVidMem, 0x60 GetSurfaceFromDC
+// 0x64 RestoreAllSurfaces, 0x68 TestCooperativeLevel, 0x6C GetDeviceIdentifier
+// 0x70 StartModeTest, 0x74 EvaluateMode
+const DD7_VTABLE_SIZE = 30; // 30 methods
+
+// IDirectDrawSurface7 vtable offsets
+// 0x00 QueryInterface, 0x04 AddRef, 0x08 Release
+// 0x0C AddAttachedSurface, 0x10 AddOverlayDirtyRect, 0x14 Blt
+// 0x18 BltBatch, 0x1C BltFast, 0x20 DeleteAttachedSurface
+// 0x24 EnumAttachedSurfaces, 0x28 EnumOverlayZOrders, 0x2C Flip
+// 0x30 GetAttachedSurface, 0x34 GetBltStatus, 0x38 GetCaps
+// 0x3C GetClipper, 0x40 GetColorKey, 0x44 GetDC, 0x48 GetFlipStatus
+// 0x4C GetOverlayPosition, 0x50 GetPalette, 0x54 GetPixelFormat
+// 0x58 GetSurfaceDesc, 0x5C Initialize, 0x60 IsLost
+// 0x64 Lock, 0x68 ReleaseDC, 0x6C Restore, 0x70 SetClipper
+// 0x74 SetColorKey, 0x78 SetOverlayPosition, 0x7C SetPalette
+// 0x80 Unlock, 0x84 UpdateOverlay, 0x88 UpdateOverlayDisplay
+// 0x8C UpdateOverlayZOrder, 0x90 GetDDInterface, 0x94 PageLock
+// 0x98 PageUnlock, 0x9C SetSurfaceDesc, 0xA0 SetPrivateData
+// 0xA4 GetPrivateData, 0xA8 FreePrivateData, 0xAC GetUniquenessValue
+// 0xB0 ChangeUniquenessValue, 0xB4 SetPriority, 0xB8 GetPriority
+// 0xBC SetLOD, 0xC0 GetLOD
+const DDS7_VTABLE_SIZE = 49; // 49 methods
+
+// IDirectDrawClipper vtable: QI, AddRef, Release, GetClipList, GetHWnd, Initialize, IsClipListChanged, SetClipList, SetHWnd
+const DDC_VTABLE_SIZE = 9;
+
+// DDSCAPS2 flags
+const DDSCAPS_PRIMARYSURFACE = 0x00000200;
+const DDSCAPS_BACKBUFFER = 0x00000004;
+const DDSCAPS_FLIP = 0x00000010;
+const DDSCAPS_COMPLEX = 0x00000008;
+
+// DDSD flags
+const DDSD_CAPS = 0x00000001;
+const DDSD_HEIGHT = 0x00000002;
+const DDSD_WIDTH = 0x00000004;
+const DDSD_PITCH = 0x00000008;
+const DDSD_BACKBUFFERCOUNT = 0x00000020;
+const DDSD_PIXELFORMAT = 0x00001000;
+const DDSD_LPSURFACE = 0x00000800;
+
+// DDPF flags
+const DDPF_RGB = 0x00000040;
+
+// HRESULT codes
+const DD_OK = 0;
+const DDERR_GENERIC = 0x80004005;
+
+interface DDSurface {
+  objAddr: number;        // COM object address
+  width: number;
+  height: number;
+  pitch: number;
+  bpp: number;            // bits per pixel
+  pixelData: number;      // address of pixel buffer
+  isPrimary: boolean;
+  backBuffer?: number;    // handle to back buffer surface
+  attachedTo?: number;    // parent surface objAddr
+}
+
+function allocComObject(emu: Emulator, prefix: string, methodCount: number, handlers: Record<number, () => number>): number {
+  // Allocate vtable
+  const vtableAddr = emu.allocHeap(methodCount * 4);
+  // Allocate object (first DWORD = vtable pointer)
+  const objAddr = emu.allocHeap(4);
+  emu.memory.writeU32(objAddr, vtableAddr);
+
+  // For each method, create a thunk
+  for (let i = 0; i < methodCount; i++) {
+    const thunkAddr = emu.dynamicThunkPtr;
+    emu.dynamicThunkPtr += 4;
+    emu.memory.writeU32(vtableAddr + i * 4, thunkAddr);
+
+    const methodName = `${prefix}_Method${i}`;
+    // COM methods use stdcall, 'this' pointer is first arg
+    // The handler should read args starting from readArg(0) = this, readArg(1) = first real arg, etc.
+    const handler = handlers[i];
+    if (handler) {
+      emu.thunkToApi.set(thunkAddr, { dll: 'DDRAW.DLL', name: methodName, stackBytes: 0 });
+      emu.thunkPages.add(thunkAddr >>> 12);
+      emu.apiDefs.set(`DDRAW.DLL:${methodName}`, { handler, stackBytes: 0 });
+    } else {
+      // Default: return DD_OK, pop 'this' only (nArgs=1 for unknown)
+      // We don't know the arg count, so use nArgs=0 and let it be cdecl-ish
+      // Actually COM is stdcall with 'this' as hidden first arg on stack
+      // But our thunk system handles this: nArgs includes 'this'
+      emu.thunkToApi.set(thunkAddr, { dll: 'DDRAW.DLL', name: methodName, stackBytes: 4 });
+      emu.thunkPages.add(thunkAddr >>> 12);
+      emu.apiDefs.set(`DDRAW.DLL:${methodName}`, { handler: () => {
+        console.log(`Unimplemented COM: ${methodName} (vtable offset 0x${(i * 4).toString(16)})`);
+        return DD_OK;
+      }, stackBytes: 4 });
+    }
+  }
+
+  return objAddr;
+}
+
+export function registerDdraw(emu: Emulator): void {
+  const surfaces = new Map<number, DDSurface>();
+  let displayWidth = 640, displayHeight = 480, displayBpp = 32;
+
+  // Helper to set stackBytes for a COM thunk after creation
+  function setComThunkStackBytes(objAddr: number, methodIndex: number, nArgs: number) {
+    const vtableAddr = emu.memory.readU32(objAddr);
+    const thunkAddr = emu.memory.readU32(vtableAddr + methodIndex * 4);
+    const info = emu.thunkToApi.get(thunkAddr);
+    if (info) info.stackBytes = nArgs * 4;
+  }
+
+  // Blit surface pixels to canvas
+  function blitToCanvas(surf: DDSurface) {
+    const ctx = emu.canvasCtx;
+    if (!ctx) return;
+    const w = surf.width, h = surf.height;
+    const imgData = ctx.createImageData(w, h);
+    const dst = imgData.data;
+    const mem = emu.memory;
+    const base = surf.pixelData;
+    const pitch = surf.pitch;
+    const bpp = surf.bpp;
+
+    if (bpp === 16) {
+      // RGB565
+      for (let y = 0; y < h; y++) {
+        const rowOff = base + y * pitch;
+        for (let x = 0; x < w; x++) {
+          const px = mem.readU16(rowOff + x * 2);
+          const r = ((px >> 11) & 0x1F) * 255 / 31;
+          const g = ((px >> 5) & 0x3F) * 255 / 63;
+          const b = (px & 0x1F) * 255 / 31;
+          const di = (y * w + x) * 4;
+          dst[di] = r; dst[di + 1] = g; dst[di + 2] = b; dst[di + 3] = 255;
+        }
+      }
+    } else if (bpp === 32) {
+      // BGRA (Windows DWORD order: B,G,R,A in memory)
+      for (let y = 0; y < h; y++) {
+        const rowOff = base + y * pitch;
+        for (let x = 0; x < w; x++) {
+          const px = mem.readU32(rowOff + x * 4);
+          const di = (y * w + x) * 4;
+          dst[di] = (px >> 16) & 0xFF;     // R
+          dst[di + 1] = (px >> 8) & 0xFF;  // G
+          dst[di + 2] = px & 0xFF;          // B
+          dst[di + 3] = 255;
+        }
+      }
+    }
+
+    // Resize canvas to match display mode if needed
+    if (emu.canvas && (emu.canvas.width !== w || emu.canvas.height !== h)) {
+      emu.canvas.width = w;
+      emu.canvas.height = h;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  // Copy pixels between surfaces for Blt
+  function bltSurfaces(dstSurf: DDSurface, dstRect: number, srcSurf: DDSurface | null, srcRect: number) {
+    if (!srcSurf) return;
+    const mem = emu.memory;
+
+    // Read rects (RECT: left, top, right, bottom — each LONG = 4 bytes)
+    let dl = 0, dt = 0, dr = dstSurf.width, db = dstSurf.height;
+    if (dstRect) {
+      dl = mem.readU32(dstRect) | 0; dt = mem.readU32(dstRect + 4) | 0;
+      dr = mem.readU32(dstRect + 8) | 0; db = mem.readU32(dstRect + 12) | 0;
+    }
+    let sl = 0, st = 0, sr = srcSurf.width, sb = srcSurf.height;
+    if (srcRect) {
+      sl = mem.readU32(srcRect) | 0; st = mem.readU32(srcRect + 4) | 0;
+      sr = mem.readU32(srcRect + 8) | 0; sb = mem.readU32(srcRect + 12) | 0;
+    }
+
+    const sw = sr - sl, sh = sb - st;
+    const dw = dr - dl, dh = db - dt;
+    const copyW = Math.min(sw, dw), copyH = Math.min(sh, dh);
+    const bytesPerPixel = dstSurf.bpp / 8;
+
+    for (let y = 0; y < copyH; y++) {
+      const srcOff = srcSurf.pixelData + (st + y) * srcSurf.pitch + sl * bytesPerPixel;
+      const dstOff = dstSurf.pixelData + (dt + y) * dstSurf.pitch + dl * bytesPerPixel;
+      for (let x = 0; x < copyW * bytesPerPixel; x++) {
+        mem.writeU8(dstOff + x, mem.readU8(srcOff + x));
+      }
+    }
+  }
+
+  function createDDSurface(width: number, height: number, bpp: number, isPrimary: boolean): number {
+    const pitch = ((width * (bpp / 8) + 3) & ~3); // DWORD-aligned
+    const pixelData = emu.allocHeap(pitch * height);
+
+    const handlers: Record<number, () => number> = {};
+    const surfaceRef = { objAddr: 0 } as DDSurface;
+
+    // QueryInterface (0)
+    handlers[0] = () => DDERR_GENERIC;
+    // AddRef (1)
+    handlers[1] = () => 2;
+    // Release (2)
+    handlers[2] = () => 0;
+    // Blt (5) - this, destRect, srcSurface, srcRect, flags, bltFx
+    handlers[5] = () => {
+      const thisPtr = emu.readArg(0);
+      const dstRect = emu.readArg(1);
+      const srcObj = emu.readArg(2);
+      const srcRectPtr = emu.readArg(3);
+      const dstSurf = surfaces.get(thisPtr);
+      const srcSurf = srcObj ? surfaces.get(srcObj) : null;
+      if (dstSurf && srcSurf) {
+        bltSurfaces(dstSurf, dstRect, srcSurf, srcRectPtr);
+      }
+      return DD_OK;
+    };
+    // BltFast (7) - this, x, y, srcSurface, srcRect, flags
+    handlers[7] = () => {
+      const thisPtr = emu.readArg(0);
+      const dx = emu.readArg(1);
+      const dy = emu.readArg(2);
+      const srcObj = emu.readArg(3);
+      const srcRectPtr = emu.readArg(4);
+      const dstSurf = surfaces.get(thisPtr);
+      const srcSurf = srcObj ? surfaces.get(srcObj) : null;
+      if (dstSurf && srcSurf) {
+        const mem = emu.memory;
+        let sl = 0, st = 0, sr = srcSurf.width, sb = srcSurf.height;
+        if (srcRectPtr) {
+          sl = mem.readU32(srcRectPtr) | 0; st = mem.readU32(srcRectPtr + 4) | 0;
+          sr = mem.readU32(srcRectPtr + 8) | 0; sb = mem.readU32(srcRectPtr + 12) | 0;
+        }
+        const copyW = sr - sl, copyH = sb - st;
+        const bytesPerPixel = dstSurf.bpp / 8;
+        for (let y = 0; y < copyH; y++) {
+          const srcOff = srcSurf.pixelData + (st + y) * srcSurf.pitch + sl * bytesPerPixel;
+          const dstOff = dstSurf.pixelData + (dy + y) * dstSurf.pitch + dx * bytesPerPixel;
+          for (let x = 0; x < copyW * bytesPerPixel; x++) {
+            mem.writeU8(dstOff + x, mem.readU8(srcOff + x));
+          }
+        }
+      }
+      return DD_OK;
+    };
+    // Flip (11) - this, targetOverride, flags
+    handlers[11] = () => {
+      const thisPtr = emu.readArg(0);
+      const surf = surfaces.get(thisPtr);
+      if (surf && surf.backBuffer) {
+        const bbSurf = surfaces.get(surf.backBuffer);
+        if (bbSurf) blitToCanvas(bbSurf);
+      }
+      return DD_OK;
+    };
+    // GetAttachedSurface (12) - this, caps, outSurface
+    handlers[12] = () => {
+      const thisPtr = emu.readArg(0);
+      const outPtr = emu.readArg(2);
+      const surf = surfaces.get(thisPtr);
+      if (surf && surf.backBuffer) {
+        emu.memory.writeU32(outPtr, surf.backBuffer);
+        return DD_OK;
+      }
+      console.log(`[DDRAW] GetAttachedSurface FAILED for 0x${thisPtr.toString(16)}`);
+      return DDERR_GENERIC;
+    };
+    // GetBltStatus (13)
+    handlers[13] = () => DD_OK;
+    // GetCaps (14)
+    handlers[14] = () => DD_OK;
+    // GetDC (17) - this, outHDC
+    handlers[17] = () => {
+      const outPtr = emu.readArg(1);
+      // Return a fake HDC
+      emu.memory.writeU32(outPtr, 0xDDDC0001);
+      return DD_OK;
+    };
+    // GetFlipStatus (18)
+    handlers[18] = () => DD_OK;
+    // GetPixelFormat (21) - this, outPF
+    handlers[21] = () => {
+      const pfPtr = emu.readArg(1);
+      // DDPIXELFORMAT: size(4), flags(4), fourCC(4), rgbBitCount(4), rMask(4), gMask(4), bMask(4), aMask(4)
+      emu.memory.writeU32(pfPtr + 0, 32); // size
+      emu.memory.writeU32(pfPtr + 4, DDPF_RGB);
+      emu.memory.writeU32(pfPtr + 8, 0); // fourCC
+      emu.memory.writeU32(pfPtr + 12, bpp);
+      if (bpp === 32) {
+        emu.memory.writeU32(pfPtr + 16, 0x00FF0000); // R
+        emu.memory.writeU32(pfPtr + 20, 0x0000FF00); // G
+        emu.memory.writeU32(pfPtr + 24, 0x000000FF); // B
+        emu.memory.writeU32(pfPtr + 28, 0xFF000000); // A
+      } else if (bpp === 16) {
+        emu.memory.writeU32(pfPtr + 16, 0xF800);
+        emu.memory.writeU32(pfPtr + 20, 0x07E0);
+        emu.memory.writeU32(pfPtr + 24, 0x001F);
+        emu.memory.writeU32(pfPtr + 28, 0);
+      }
+      return DD_OK;
+    };
+    // GetSurfaceDesc (22) - this, outDesc
+    handlers[22] = () => {
+      const descPtr = emu.readArg(1);
+      writeSurfaceDesc(descPtr, width, height, pitch, bpp, pixelData);
+      return DD_OK;
+    };
+    // IsLost (24)
+    handlers[24] = () => DD_OK;
+    // Lock (25) - this, destRect, surfaceDesc, flags, event
+    handlers[25] = () => {
+      const descPtr = emu.readArg(2);
+      writeSurfaceDesc(descPtr, width, height, pitch, bpp, pixelData);
+      return DD_OK;
+    };
+    // ReleaseDC (26) - this, hdc
+    handlers[26] = () => DD_OK;
+    // Restore (27)
+    handlers[27] = () => DD_OK;
+    // SetClipper (28) - this, clipper
+    handlers[28] = () => DD_OK;
+    // SetColorKey (29) - this, flags, colorKey
+    handlers[29] = () => DD_OK;
+    // Unlock (32) - this, rect
+    handlers[32] = () => DD_OK;
+
+    const objAddr = allocComObject(emu, 'DDS7', DDS7_VTABLE_SIZE, handlers);
+    surfaceRef.objAddr = objAddr;
+
+    // Set correct stackBytes for known methods (stdcall, includes 'this')
+    setComThunkStackBytes(objAddr, 0, 3);  // QueryInterface(this, riid, ppv)
+    setComThunkStackBytes(objAddr, 1, 1);  // AddRef(this)
+    setComThunkStackBytes(objAddr, 2, 1);  // Release(this)
+    setComThunkStackBytes(objAddr, 5, 6);  // Blt(this, destRect, srcSurf, srcRect, flags, bltFx)
+    setComThunkStackBytes(objAddr, 7, 6);  // BltFast(this, x, y, srcSurf, srcRect, flags)
+    setComThunkStackBytes(objAddr, 11, 3); // Flip(this, target, flags)
+    setComThunkStackBytes(objAddr, 12, 3); // GetAttachedSurface(this, caps, out)
+    setComThunkStackBytes(objAddr, 13, 2); // GetBltStatus(this, flags)
+    setComThunkStackBytes(objAddr, 14, 2); // GetCaps(this, caps)
+    setComThunkStackBytes(objAddr, 17, 2); // GetDC(this, hdc)
+    setComThunkStackBytes(objAddr, 18, 2); // GetFlipStatus(this, flags)
+    setComThunkStackBytes(objAddr, 21, 2); // GetPixelFormat(this, pf)
+    setComThunkStackBytes(objAddr, 22, 2); // GetSurfaceDesc(this, desc)
+    setComThunkStackBytes(objAddr, 24, 1); // IsLost(this)
+    setComThunkStackBytes(objAddr, 25, 5); // Lock(this, rect, desc, flags, event)
+    setComThunkStackBytes(objAddr, 26, 2); // ReleaseDC(this, hdc)
+    setComThunkStackBytes(objAddr, 27, 1); // Restore(this)
+    setComThunkStackBytes(objAddr, 28, 2); // SetClipper(this, clipper)
+    setComThunkStackBytes(objAddr, 29, 3); // SetColorKey(this, flags, ck)
+    setComThunkStackBytes(objAddr, 32, 2); // Unlock(this, rect)
+
+    const surf: DDSurface = { objAddr, width, height, pitch, bpp, pixelData, isPrimary };
+    surfaces.set(objAddr, surf);
+    surfaceRef.objAddr = objAddr;
+    Object.assign(surfaceRef, surf);
+
+    return objAddr;
+  }
+
+  function writeSurfaceDesc(ptr: number, width: number, height: number, pitch: number, bpp: number, pixelData: number) {
+    // DDSURFACEDESC2: size=124 bytes
+    emu.memory.writeU32(ptr + 0, 124); // dwSize
+    emu.memory.writeU32(ptr + 4, DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_LPSURFACE);
+    emu.memory.writeU32(ptr + 8, height);  // dwHeight
+    emu.memory.writeU32(ptr + 12, width);  // dwWidth
+    emu.memory.writeU32(ptr + 16, pitch);  // lPitch
+    emu.memory.writeU32(ptr + 20, 0);      // dwBackBufferCount
+    emu.memory.writeU32(ptr + 36, pixelData); // lpSurface
+    // DDPIXELFORMAT at offset 72
+    emu.memory.writeU32(ptr + 72, 32);     // dwSize
+    emu.memory.writeU32(ptr + 76, DDPF_RGB);
+    emu.memory.writeU32(ptr + 80, 0);      // fourCC
+    emu.memory.writeU32(ptr + 84, bpp);    // rgbBitCount
+    if (bpp === 32) {
+      emu.memory.writeU32(ptr + 88, 0x00FF0000);
+      emu.memory.writeU32(ptr + 92, 0x0000FF00);
+      emu.memory.writeU32(ptr + 96, 0x000000FF);
+      emu.memory.writeU32(ptr + 100, 0xFF000000);
+    } else if (bpp === 16) {
+      emu.memory.writeU32(ptr + 88, 0xF800);
+      emu.memory.writeU32(ptr + 92, 0x07E0);
+      emu.memory.writeU32(ptr + 96, 0x001F);
+      emu.memory.writeU32(ptr + 100, 0);
+    }
+    // DDSCAPS2 at offset 104
+    emu.memory.writeU32(ptr + 104, 0);
+  }
+
+  // DirectDrawCreateEx(lpGUID, lplpDD, iid, pUnkOuter) → HRESULT
+  emu.apiDefs.set('DDRAW.DLL:DirectDrawCreateEx', { handler: () => {
+    const lpGUID = emu.readArg(0);
+    const lplpDD = emu.readArg(1);
+    const iid = emu.readArg(2);
+    const pUnkOuter = emu.readArg(3);
+
+    console.log(`[DDRAW] DirectDrawCreateEx lpGUID=0x${lpGUID.toString(16)} lplpDD=0x${lplpDD.toString(16)}`);
+
+    // Create IDirectDraw7 COM object
+    const handlers: Record<number, () => number> = {};
+
+    // QueryInterface (0) - this, riid, ppv
+    handlers[0] = () => DDERR_GENERIC;
+    // AddRef (1)
+    handlers[1] = () => 2;
+    // Release (2)
+    handlers[2] = () => 0;
+    // CreateClipper (4) - this, flags, outClipper, outer
+    handlers[4] = () => {
+      const outPtr = emu.readArg(2);
+      // Create a simple clipper COM object
+      const clipHandlers: Record<number, () => number> = {};
+      clipHandlers[0] = () => DDERR_GENERIC; // QI
+      clipHandlers[1] = () => 2; // AddRef
+      clipHandlers[2] = () => 0; // Release
+      // SetHWnd (8) - this, flags, hwnd
+      clipHandlers[8] = () => DD_OK;
+      const clipObj = allocComObject(emu, 'DDC', DDC_VTABLE_SIZE, clipHandlers);
+      setComThunkStackBytes(clipObj, 0, 3);
+      setComThunkStackBytes(clipObj, 1, 1);
+      setComThunkStackBytes(clipObj, 2, 1);
+      setComThunkStackBytes(clipObj, 8, 3); // SetHWnd(this, flags, hwnd)
+      emu.memory.writeU32(outPtr, clipObj);
+      return DD_OK;
+    };
+    // CreateSurface (6) - this, desc, outSurface, outer
+    handlers[6] = () => {
+      const descPtr = emu.readArg(1);
+      const outPtr = emu.readArg(2);
+
+      const flags = emu.memory.readU32(descPtr + 4);
+      const height = (flags & DDSD_HEIGHT) ? emu.memory.readU32(descPtr + 8) : displayHeight;
+      const width = (flags & DDSD_WIDTH) ? emu.memory.readU32(descPtr + 12) : displayWidth;
+      const caps = emu.memory.readU32(descPtr + 104);
+      const backBufferCount = (flags & DDSD_BACKBUFFERCOUNT) ? emu.memory.readU32(descPtr + 20) : 0;
+
+      console.log(`[DDRAW] CreateSurface ${width}x${height} caps=0x${caps.toString(16)} backBuffers=${backBufferCount} flags=0x${flags.toString(16)}`);
+
+      const isPrimary = !!(caps & DDSCAPS_PRIMARYSURFACE);
+      const surfW = isPrimary ? displayWidth : width;
+      const surfH = isPrimary ? displayHeight : height;
+
+      const surfObj = createDDSurface(surfW, surfH, displayBpp, isPrimary);
+      emu.memory.writeU32(outPtr, surfObj);
+
+      // Create back buffer if requested
+      if (backBufferCount > 0) {
+        const bbObj = createDDSurface(surfW, surfH, displayBpp, false);
+        const surf = surfaces.get(surfObj);
+        if (surf) surf.backBuffer = bbObj;
+        const bbSurf = surfaces.get(bbObj);
+        if (bbSurf) bbSurf.attachedTo = surfObj;
+      }
+
+      return DD_OK;
+    };
+    // GetCaps (11) - this, driverCaps, helCaps
+    handlers[11] = () => DD_OK;
+    // GetDisplayMode (12) - this, surfDesc
+    handlers[12] = () => {
+      const descPtr = emu.readArg(1);
+      const pitch = ((displayWidth * (displayBpp / 8) + 3) & ~3);
+      writeSurfaceDesc(descPtr, displayWidth, displayHeight, pitch, displayBpp, 0);
+      return DD_OK;
+    };
+    // RestoreDisplayMode (19)
+    handlers[19] = () => DD_OK;
+    // SetCooperativeLevel (20) - this, hwnd, flags
+    handlers[20] = () => {
+      console.log(`[DDRAW] SetCooperativeLevel hwnd=0x${emu.readArg(1).toString(16)} flags=0x${emu.readArg(2).toString(16)}`);
+      return DD_OK;
+    };
+    // SetDisplayMode (21) - this, width, height, bpp, refreshRate, flags
+    handlers[21] = () => {
+      displayWidth = emu.readArg(1);
+      displayHeight = emu.readArg(2);
+      displayBpp = emu.readArg(3);
+      console.log(`[DDRAW] SetDisplayMode ${displayWidth}x${displayHeight}x${displayBpp}`);
+      if (emu.canvas) {
+        emu.canvas.width = displayWidth;
+        emu.canvas.height = displayHeight;
+      }
+      return DD_OK;
+    };
+    // WaitForVerticalBlank (22) - this, flags, event
+    handlers[22] = () => DD_OK;
+    // TestCooperativeLevel (26)
+    handlers[26] = () => DD_OK;
+
+    const ddObj = allocComObject(emu, 'DD7', DD7_VTABLE_SIZE, handlers);
+
+    // Set stackBytes for known methods
+    setComThunkStackBytes(ddObj, 0, 3);  // QueryInterface
+    setComThunkStackBytes(ddObj, 1, 1);  // AddRef
+    setComThunkStackBytes(ddObj, 2, 1);  // Release
+    setComThunkStackBytes(ddObj, 4, 4);  // CreateClipper(this, flags, out, outer)
+    setComThunkStackBytes(ddObj, 6, 4);  // CreateSurface(this, desc, out, outer)
+    setComThunkStackBytes(ddObj, 11, 3); // GetCaps(this, driver, hel)
+    setComThunkStackBytes(ddObj, 12, 2); // GetDisplayMode(this, desc)
+    setComThunkStackBytes(ddObj, 19, 1); // RestoreDisplayMode(this)
+    setComThunkStackBytes(ddObj, 20, 3); // SetCooperativeLevel(this, hwnd, flags)
+    setComThunkStackBytes(ddObj, 21, 6); // SetDisplayMode(this, w, h, bpp, refresh, flags)
+    setComThunkStackBytes(ddObj, 22, 3); // WaitForVerticalBlank(this, flags, event)
+    setComThunkStackBytes(ddObj, 26, 1); // TestCooperativeLevel(this)
+
+    // Write object pointer to output
+    emu.memory.writeU32(lplpDD, ddObj);
+    console.log(`[DDRAW] Created IDirectDraw7 at 0x${ddObj.toString(16)}`);
+
+    return DD_OK;
+  }, stackBytes: 4 * 4 });
+
+  // DirectDrawCreate(lpGUID, lplpDD, pUnkOuter) → HRESULT
+  emu.apiDefs.set('DDRAW.DLL:DirectDrawCreate', { handler: () => {
+    // Redirect to DirectDrawCreateEx-like behavior
+    const ddCreateEx = emu.apiDefs.get('DDRAW.DLL:DirectDrawCreateEx');
+    return ddCreateEx ? ddCreateEx.handler(emu) : 0;
+  }, stackBytes: 3 * 4 });
+}

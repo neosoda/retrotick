@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  --win2k-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='23' viewBox='-1 -1 14 23'%3E%3Cpath d='M0,0 L0,17 L4,13 L7,20 L9,19 L6,12 L11,12 Z' fill='white' stroke='black' stroke-width='1' stroke-linejoin='miter'/%3E%3C/svg%3E") 1 1, auto;
+}
+
+html {
+  cursor: var(--win2k-cursor);
+}
+
+/* Override cursor:default from Tailwind and inline styles to use Win2k cursor.
+   This also prevents Arc browser from treating the area as a window drag zone. */
+@layer utilities {
+  .cursor-default {
+    cursor: var(--win2k-cursor) !important;
+  }
+}
+
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid #e0e0e0;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.data-table th {
+  background: #f0f0f0;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.data-table td:first-child {
+  white-space: nowrap;
+  color: #888;
+  width: 1%;
+}
+
+.text-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  width: 100%;
+}
+
+.text-card pre {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow: auto;
+}
