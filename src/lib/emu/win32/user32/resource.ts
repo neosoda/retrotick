@@ -1,5 +1,7 @@
 import type { Emulator } from '../../emulator';
+import type { AccelEntry } from '../../../pe/types';
 import { rvaToFileOffset } from '../../../pe/read';
+import { WM_KEYDOWN, WM_SYSKEYDOWN, WM_COMMAND, WM_SYSCOMMAND } from '../types';
 
 export function registerResource(emu: Emulator): void {
   const user32 = emu.registerDll('USER32.DLL');
@@ -253,16 +255,99 @@ export function registerResource(emu: Emulator): void {
     return maxChars;
   });
 
+  const RT_ACCELERATOR = 9;
+  const FVIRTKEY = 0x01;
+  const FSHIFT = 0x04;
+  const FCONTROL = 0x08;
+  const FALT = 0x10;
+
+  function loadAccelTable(hInstance: number, resourceId: number | string): number {
+    // Find the accelerator resource
+    const entry = emu.findResourceEntry(RT_ACCELERATOR, resourceId);
+    if (!entry) return emu.handles.alloc('accel', { entries: [] as AccelEntry[] });
+
+    let fileOffset: number;
+    try {
+      fileOffset = rvaToFileOffset(entry.dataRva, emu.peInfo.sections);
+    } catch {
+      fileOffset = entry.dataRva;
+    }
+
+    const dv = new DataView(emu.arrayBuffer, fileOffset, entry.dataSize);
+    const entries: AccelEntry[] = [];
+    const count = Math.floor(entry.dataSize / 8);
+    for (let i = 0; i < count; i++) {
+      const off = i * 8;
+      const fVirt = dv.getUint16(off, true);
+      const key = dv.getUint16(off + 2, true);
+      const cmd = dv.getUint16(off + 4, true);
+      entries.push({ fVirt, key, cmd, keyName: '' });
+      if (fVirt & 0x80) break; // last entry
+    }
+
+    return emu.handles.alloc('accel', { entries });
+  }
+
   user32.register('LoadAcceleratorsA', 2, () => {
-    return emu.handles.alloc('accel', {});
+    const hInstance = emu.readArg(0);
+    const namePtr = emu.readArg(1);
+    const resourceId = namePtr < 0x10000 ? namePtr : emu.memory.readCString(namePtr);
+    return loadAccelTable(hInstance, resourceId);
   });
 
   user32.register('LoadAcceleratorsW', 2, () => {
-    return emu.handles.alloc('accel', {});
+    const hInstance = emu.readArg(0);
+    const namePtr = emu.readArg(1);
+    const resourceId = namePtr < 0x10000 ? namePtr : emu.memory.readUTF16String(namePtr);
+    return loadAccelTable(hInstance, resourceId);
   });
 
-  user32.register('TranslateAcceleratorA', 3, () => 0);
-  user32.register('TranslateAcceleratorW', 3, () => 0);
+  function translateAccelImpl(): number {
+    const hWnd = emu.readArg(0);
+    const hAccTable = emu.readArg(1);
+    const pMsg = emu.readArg(2);
+
+    const accelData = emu.handles.get<{ entries: AccelEntry[] }>(hAccTable);
+    if (!accelData || !accelData.entries.length) return 0;
+
+    // Read MSG struct: hwnd(+0), message(+4), wParam(+8), lParam(+12)
+    const msgType = emu.memory.readU32(pMsg + 4);
+    const vKey = emu.memory.readU32(pMsg + 8);
+
+    // TranslateAccelerator only processes key-down messages
+    if (msgType !== WM_KEYDOWN && msgType !== WM_SYSKEYDOWN) return 0;
+
+    for (const accel of accelData.entries) {
+      if (accel.fVirt & FVIRTKEY) {
+        // Virtual key match
+        if (vKey !== accel.key) continue;
+
+        // Check modifier state
+        const shiftDown = emu.keyStates.has(0x10);
+        const ctrlDown = emu.keyStates.has(0x11);
+        const altDown = emu.keyStates.has(0x12);
+
+        if (!!(accel.fVirt & FSHIFT) !== shiftDown) continue;
+        if (!!(accel.fVirt & FCONTROL) !== ctrlDown) continue;
+        if (!!(accel.fVirt & FALT) !== altDown) continue;
+      } else {
+        // ASCII character match — only match WM_KEYDOWN with the character value
+        if (vKey !== accel.key) continue;
+      }
+
+      // Match found — send WM_COMMAND (or WM_SYSCOMMAND for Alt accelerators)
+      const msg = (accel.fVirt & FALT) ? WM_SYSCOMMAND : WM_COMMAND;
+      // wParam: HIWORD=1 (accelerator), LOWORD=cmd
+      const wParam = (1 << 16) | accel.cmd;
+      emu.postMessage(hWnd, msg, wParam, 0);
+      return 1;
+    }
+
+    return 0;
+  }
+
+  user32.register('TranslateAcceleratorA', 3, translateAccelImpl);
+  user32.register('TranslateAcceleratorW', 3, translateAccelImpl);
 
   user32.register('CreateIcon', 7, () => emu.handles.alloc('icon', {}));
   user32.register('DestroyIcon', 1, () => 1);
