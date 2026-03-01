@@ -1,4 +1,5 @@
 import type { Emulator, Win16Module } from '../../emulator';
+import type { WindowInfo } from '../../win32/user32/types';
 import type { Win16UserHelpers } from './index';
 import { emuCompleteThunk16 } from '../../emu-exec';
 
@@ -85,13 +86,42 @@ export function registerWin16UserMisc(emu: Emulator, user: Win16Module, h: Win16
   user.register('ord_31', 2, () => 0);
 
   // Ordinal 61: SetScrollPos(hWnd, nBar, nPos, bRedraw) — 8 bytes
-  user.register('ord_61', 8, () => 0);
+  user.register('ord_61', 8, () => {
+    const [hWnd, nBar, nPos] = emu.readPascalArgs16([2, 2, 2]);
+    const wnd = emu.handles.get<WindowInfo>(hWnd);
+    if (!wnd) return 0;
+    if (!wnd.scrollInfo) wnd.scrollInfo = [
+      { min: 0, max: 100, pos: 0, page: 0 },
+      { min: 0, max: 100, pos: 0, page: 0 },
+    ];
+    const bar = nBar & 1; // SB_HORZ=0, SB_VERT=1
+    const old = wnd.scrollInfo[bar].pos;
+    wnd.scrollInfo[bar].pos = (nPos << 16 >> 16); // sign-extend
+    return old;
+  });
 
   // Ordinal 62: GetScrollPos(hWnd, nBar) — 4 bytes
-  user.register('ord_62', 4, () => 0);
+  user.register('ord_62', 4, () => {
+    const [hWnd, nBar] = emu.readPascalArgs16([2, 2]);
+    const wnd = emu.handles.get<WindowInfo>(hWnd);
+    const bar = nBar & 1;
+    return wnd?.scrollInfo?.[bar]?.pos ?? 0;
+  });
 
   // Ordinal 64: SetScrollRange(hWnd, nBar, nMinPos, nMaxPos, bRedraw) — 10 bytes
-  user.register('ord_64', 10, () => 1);
+  user.register('ord_64', 10, () => {
+    const [hWnd, nBar, nMinPos, nMaxPos] = emu.readPascalArgs16([2, 2, 2, 2]);
+    const wnd = emu.handles.get<WindowInfo>(hWnd);
+    if (!wnd) return 1;
+    if (!wnd.scrollInfo) wnd.scrollInfo = [
+      { min: 0, max: 100, pos: 0, page: 0 },
+      { min: 0, max: 100, pos: 0, page: 0 },
+    ];
+    const bar = nBar & 1;
+    wnd.scrollInfo[bar].min = (nMinPos << 16 >> 16);
+    wnd.scrollInfo[bar].max = (nMaxPos << 16 >> 16);
+    return 1;
+  });
 
   // Ordinal 69: SetCursor(hCursor) — 2 bytes
   user.register('ord_69', 2, () => 1);
@@ -104,10 +134,13 @@ export function registerWin16UserMisc(emu: Emulator, user: Win16Module, h: Win16
 
   // Ordinal 93: GetScrollRange(hWnd, nBar, lpMinPos, lpMaxPos) — 10 bytes
   user.register('ord_93', 10, () => {
-    const [_hWnd, _nBar, lpMinPos, lpMaxPos] = emu.readPascalArgs16([2, 2, 4, 4]);
-    if (lpMinPos) emu.memory.writeU16(lpMinPos, 0);
-    if (lpMaxPos) emu.memory.writeU16(lpMaxPos, 0);
-    return 0;
+    const [hWnd, nBar, lpMinPos, lpMaxPos] = emu.readPascalArgs16([2, 2, 4, 4]);
+    const wnd = emu.handles.get<WindowInfo>(hWnd);
+    const bar = nBar & 1;
+    const info = wnd?.scrollInfo?.[bar];
+    if (lpMinPos) emu.memory.writeU16(lpMinPos, (info?.min ?? 0) & 0xFFFF);
+    if (lpMaxPos) emu.memory.writeU16(lpMaxPos, (info?.max ?? 0) & 0xFFFF);
+    return 1;
   });
 
   // Ordinal 101: SetParent(hWndChild, hWndNewParent) — 4 bytes

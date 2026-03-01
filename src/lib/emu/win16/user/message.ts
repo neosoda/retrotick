@@ -16,6 +16,37 @@ export function registerWin16UserMessage(emu: Emulator, user: Win16Module, h: Wi
     const WM_DESTROY = 0x0002;
     const SC_CLOSE = 0xF060;
 
+    const WM_NCCREATE = 0x0081;
+    if (msg === WM_NCCREATE) {
+      const wnd = emu.handles.get<WindowInfo>(hWnd);
+      if (wnd) {
+        // Initialize scroll bars if window has WS_HSCROLL or WS_VSCROLL
+        const WS_HSCROLL = 0x00100000;
+        const WS_VSCROLL = 0x00200000;
+        if (wnd.style & (WS_HSCROLL | WS_VSCROLL)) {
+          wnd.scrollInfo = [
+            { min: 0, max: 100, pos: 0, page: 0 }, // SB_HORZ
+            { min: 0, max: 100, pos: 0, page: 0 }, // SB_VERT
+          ];
+        }
+        // Set window text from CREATESTRUCT.lpszName if lParam is valid
+        if (lParam) {
+          // Win16 CREATESTRUCT: lpszName is a far pointer at offset +22
+          const lpszName = emu.memory.readU32(lParam + 22);
+          if (lpszName) {
+            const seg = (lpszName >>> 16) & 0xFFFF;
+            const off = lpszName & 0xFFFF;
+            const base = emu.cpu.segBases.get(seg);
+            if (base !== undefined) {
+              const text = emu.memory.readCString(base + off);
+              if (text) wnd.title = text;
+            }
+          }
+        }
+      }
+      return 1;
+    }
+
     if (msg === WM_SYSCOMMAND) {
       if ((wParam & 0xFFF0) === SC_CLOSE) {
         emu.postMessage(hWnd, WM_CLOSE, 0, 0);
