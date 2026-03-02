@@ -20,6 +20,7 @@ import { FolderWindow } from './FolderWindow';
 import { WelcomeWindow } from './WelcomeWindow';
 import { Desktop } from './Desktop';
 import { Taskbar } from './win2k/Taskbar';
+import { xpTheme } from './win2k/styles';
 import { MessageBox, MB_YESNO, MB_ICONQUESTION, IDYES } from './win2k/MessageBox';
 import { ProcessRegistry } from '../lib/emu/emulator';
 import type { Emulator } from '../lib/emu/emulator';
@@ -267,7 +268,7 @@ export function App() {
           position: 'absolute',
           inset: 0,
           overflow: 'auto',
-          background: 'linear-gradient(180deg, #8ec8ff 0%, #6ab2f6 33%, #4f96e8 100%)',
+          background: xpTheme.desktop.background,
         }} onPointerDown={() => setFocusedAppId(null)}>
           <Desktop onRunExe={handleRunExe} onViewResources={handleViewResources} onOpenFolder={handleOpenFolder} />
         </div>

@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
+import { xpTheme } from './styles';
 
 // --- Caption bar button SVGs ---
 
@@ -189,16 +190,16 @@ export function Window({
       </>}
       {/* Frame border */}
       <div style={{
-        background: '#ece9d8', ...(clientW != null ? { width: `${clientW}px` } : {}), boxSizing: 'content-box',
+        background: xpTheme.window.frameBg, ...(clientW != null ? { width: `${clientW}px` } : {}), boxSizing: 'content-box',
         ...(maximized ? {} :
           (wStyle & WS_THICKFRAME) ? {
             padding: '4px',
             borderRadius: '7px 7px 0 0',
-            boxShadow: 'inset 1px 1px 0 #fff, inset -1px -1px 0 #7f9db9, 0 0 0 1px #0054e3',
+            boxShadow: xpTheme.window.frameShadow,
           } : (wStyle & WS_DLGFRAME) ? {
             padding: '3px',
             borderRadius: '7px 7px 0 0',
-            boxShadow: 'inset 1px 1px 0 #fff, inset -1px -1px 0 #7f9db9, 0 0 0 1px #0054e3',
+            boxShadow: xpTheme.window.frameShadow,
           } : (wStyle & WS_BORDER) ? {
             padding: '1px',
             boxShadow: 'inset 0 0 0 1px #000',
@@ -209,7 +210,7 @@ export function Window({
           onPointerDown={handleDragTitleMouseDown}
           onDblClick={onTitleBarDblClick}
           style={{
-            background: effectiveFocused ? 'linear-gradient(to bottom, #0a4fdd, #3d95ff)' : 'linear-gradient(to bottom, #7a96df, #9db9ed)',
+            background: effectiveFocused ? xpTheme.window.focusedCaption : xpTheme.window.unfocusedCaption,
             color: '#FFF', font: 'bold 12px/1 "Tahoma",sans-serif',
             padding: '2px 2px', display: 'flex', alignItems: 'center',
             height: '24px', userSelect: 'none', borderRadius: maximized ? '0' : '5px 5px 0 0',

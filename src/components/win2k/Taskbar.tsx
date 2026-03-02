@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import type { MenuItem } from '../../lib/pe/types';
 import { MenuDropdown } from './MenuBar';
+import { xpTheme } from './styles';
 
 interface TaskbarApp {
   id: number;
@@ -68,8 +69,8 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
   return (
     <div style={{
       position: 'relative', height: '30px', flexShrink: 0,
-      background: 'linear-gradient(to bottom, #3a93ff, #1f6fdf)', zIndex: 9999,
-      borderTop: '1px solid #7fc3ff',
+      background: xpTheme.taskbar.background, zIndex: 9999,
+      borderTop: `1px solid ${xpTheme.taskbar.borderTop}`,
       display: 'flex', alignItems: 'center',
       font: '11px/1 "Tahoma", "MS Sans Serif", sans-serif',
       userSelect: 'none', touchAction: 'none', overflow: 'hidden',
@@ -96,9 +97,9 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
             display: 'flex', alignItems: 'center', gap: '3px',
             height: '22px', padding: '0 6px',
             cursor: 'var(--win2k-cursor)',
-            background: startOpen ? 'linear-gradient(to bottom, #3a8fff, #2a64d5)' : 'linear-gradient(to bottom, #4cc34f, #2a8f2d)',
+            background: startOpen ? xpTheme.startButton.activeBackground : xpTheme.startButton.inactiveBackground,
             border: '1px solid',
-            borderColor: startOpen ? '#1f4e9b #70b5ff #70b5ff #1f4e9b' : '#9de59f #1e6621 #1e6621 #9de59f',
+            borderColor: startOpen ? xpTheme.startButton.activeBorder : xpTheme.startButton.inactiveBorder,
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.45)',
             borderRadius: '3px',
             fontWeight: 'bold',
@@ -112,7 +113,7 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
             <MenuDropdown
               items={[
                 { id: 1, text: 'Bienvenue', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
-                { id: 4, text: 'Projet GitHub', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
+                { id: 4, text: 'Projet GitHub RetroTick', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
                 { id: 0, text: '', isSeparator: true, isChecked: false, isGrayed: false, isDefault: false, children: null },
                 { id: 3, text: 'Réinitialiser...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
                 { id: 2, text: 'Éteindre...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
@@ -148,9 +149,9 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
                 height: '22px', padding: '0 4px',
                 flex: '0 1 160px', minWidth: '24px',
                 cursor: 'var(--win2k-cursor)', overflow: 'hidden',
-                background: isPressed ? 'linear-gradient(to bottom, #2f7fe2, #225fb9)' : 'linear-gradient(to bottom, #4fa4ff, #2f7fe2)',
+                background: isPressed ? xpTheme.taskButton.activeBackground : xpTheme.taskButton.inactiveBackground,
                 border: '1px solid',
-                borderColor: isPressed ? '#194a99 #72beff #72beff #194a99' : '#9cd2ff #1c59ad #1c59ad #9cd2ff',
+                borderColor: isPressed ? xpTheme.taskButton.activeBorder : xpTheme.taskButton.inactiveBorder,
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.4)',
                 borderRadius: '2px',
                 fontWeight: 'normal',
@@ -172,8 +173,8 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
       <div style={{
         display: 'flex', alignItems: 'center', height: '22px', padding: '0 8px',
         margin: '0 2px', flexShrink: 0,
-        border: '1px solid', borderColor: '#6fb8ff #1f60b9 #1f60b9 #6fb8ff',
-        background: 'linear-gradient(to bottom, #4fa4ff, #2f7fe2)',
+        border: '1px solid', borderColor: xpTheme.tray.border,
+        background: xpTheme.tray.background,
         color: '#fff',
         fontSize: '11px',
         borderRadius: '2px',
