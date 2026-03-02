@@ -68,8 +68,8 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
   return (
     <div style={{
       position: 'relative', height: '30px', flexShrink: 0,
-      background: '#D4D0C8', zIndex: 9999,
-      borderTop: '1px solid #FFF',
+      background: 'linear-gradient(to bottom, #3a93ff, #1f6fdf)', zIndex: 9999,
+      borderTop: '1px solid #7fc3ff',
       display: 'flex', alignItems: 'center',
       font: '11px/1 "Tahoma", "MS Sans Serif", sans-serif',
       userSelect: 'none', touchAction: 'none', overflow: 'hidden',
@@ -96,13 +96,13 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
             display: 'flex', alignItems: 'center', gap: '3px',
             height: '22px', padding: '0 6px',
             cursor: 'var(--win2k-cursor)',
-            background: '#D4D0C8',
+            background: startOpen ? 'linear-gradient(to bottom, #3a8fff, #2a64d5)' : 'linear-gradient(to bottom, #4cc34f, #2a8f2d)',
             border: '1px solid',
-            borderColor: startOpen ? '#404040 #FFF #FFF #404040' : '#FFF #404040 #404040 #FFF',
-            boxShadow: startOpen
-              ? 'inset 1px 1px 0 #808080, inset -1px -1px 0 #D4D0C8'
-              : 'inset 1px 1px 0 #D4D0C8, inset -1px -1px 0 #808080',
+            borderColor: startOpen ? '#1f4e9b #70b5ff #70b5ff #1f4e9b' : '#9de59f #1e6621 #1e6621 #9de59f',
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.45)',
+            borderRadius: '3px',
             fontWeight: 'bold',
+            color: '#fff',
           }}
         >
           <span style={{ lineHeight: '16px' }}>Démarrer</span>
@@ -148,13 +148,13 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
                 height: '22px', padding: '0 4px',
                 flex: '0 1 160px', minWidth: '24px',
                 cursor: 'var(--win2k-cursor)', overflow: 'hidden',
-                background: '#D4D0C8',
+                background: isPressed ? 'linear-gradient(to bottom, #2f7fe2, #225fb9)' : 'linear-gradient(to bottom, #4fa4ff, #2f7fe2)',
                 border: '1px solid',
-                borderColor: isPressed ? '#404040 #FFF #FFF #404040' : '#FFF #404040 #404040 #FFF',
-                boxShadow: isPressed
-                  ? 'inset 1px 1px 0 #808080, inset -1px -1px 0 #D4D0C8'
-                  : 'inset 1px 1px 0 #D4D0C8, inset -1px -1px 0 #808080',
+                borderColor: isPressed ? '#194a99 #72beff #72beff #194a99' : '#9cd2ff #1c59ad #1c59ad #9cd2ff',
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.4)',
+                borderRadius: '2px',
                 fontWeight: 'normal',
+                color: '#fff',
               }}
             >
               {app.iconUrl && (
@@ -172,8 +172,11 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
       <div style={{
         display: 'flex', alignItems: 'center', height: '22px', padding: '0 8px',
         margin: '0 2px', flexShrink: 0,
-        border: '1px solid', borderColor: '#808080 #FFF #FFF #808080',
+        border: '1px solid', borderColor: '#6fb8ff #1f60b9 #1f60b9 #6fb8ff',
+        background: 'linear-gradient(to bottom, #4fa4ff, #2f7fe2)',
+        color: '#fff',
         fontSize: '11px',
+        borderRadius: '2px',
       }}>
         <Clock />
       </div>
