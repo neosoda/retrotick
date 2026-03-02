@@ -20,6 +20,7 @@ import { FolderWindow } from './FolderWindow';
 import { WelcomeWindow } from './WelcomeWindow';
 import { Desktop } from './Desktop';
 import { Taskbar } from './win2k/Taskbar';
+import { xpTheme } from './win2k/styles';
 import { MessageBox, MB_YESNO, MB_ICONQUESTION, IDYES } from './win2k/MessageBox';
 import { ProcessRegistry } from '../lib/emu/emulator';
 import type { Emulator } from '../lib/emu/emulator';
@@ -75,19 +76,19 @@ function isExecutable(peInfo: PEInfo, fileName?: string): boolean {
 }
 
 export function App() {
+  const welcomeId = useRef(-1);
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('welcome-dismissed'));
   const [runningApps, setRunningApps] = useState<RunningApp[]>([]);
   const [resourceViewers, setResourceViewers] = useState<ResourceViewerApp[]>([]);
   const [openFolders, setOpenFolders] = useState<OpenFolder[]>([]);
-  const [focusedAppId, setFocusedAppId] = useState<number | null>(-1);
+  const [focusedAppId, setFocusedAppId] = useState<number | null>(() => (!localStorage.getItem('welcome-dismissed') ? welcomeId.current : null));
   const focusHistory = useRef<number[]>([]);
   const [loadingAppIds, setLoadingAppIds] = useState<Set<number>>(new Set());
   const [windowTitles, setWindowTitles] = useState<Map<number, string>>(new Map());
   const [windowIcons, setWindowIcons] = useState<Map<number, string | null>>(new Map());
   const [appLangs, setAppLangs] = useState<Map<number, string | null>>(new Map());
   const [minimizedApps, setMinimizedApps] = useState<Set<number>>(new Set());
-  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('welcome-dismissed'));
   const [confirmDialog, setConfirmDialog] = useState<{ text: string; onYes: () => void } | null>(null);
-  const welcomeId = useRef(-1);
   const nextAppId = useRef(1);
   const processRegistry = useRef(new ProcessRegistry()).current;
   const closeHandlers = useRef(new Map<number, () => void>());
@@ -267,7 +268,7 @@ export function App() {
           position: 'absolute',
           inset: 0,
           overflow: 'auto',
-          background: 'linear-gradient(180deg, #8ec8ff 0%, #6ab2f6 33%, #4f96e8 100%)',
+          background: xpTheme.desktop.background,
         }} onPointerDown={() => setFocusedAppId(null)}>
           <Desktop onRunExe={handleRunExe} onViewResources={handleViewResources} onOpenFolder={handleOpenFolder} />
         </div>

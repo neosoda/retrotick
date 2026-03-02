@@ -1,6 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useState } from 'preact/hooks';
-import { disabledTextStyle } from './styles';
+import { disabledTextStyle, xpTheme } from './styles';
 
 interface ButtonProps {
   children: ComponentChildren;
@@ -19,24 +19,14 @@ export function Button({ children, fontCSS, isDefault, disabled, fontColor }: Bu
       onPointerUp={() => setPressed(false)}
       onPointerLeave={() => setPressed(false)}
       style={{
-        width: '100%', height: '100%', background: '#D4D0C8', cursor: 'var(--win2k-cursor)',
-        ...(active
-          ? {
-              border: isDefault ? '1px solid #000' : '1px solid',
-              borderColor: isDefault ? undefined : '#404040 #FFF #FFF #404040',
-              boxShadow: isDefault
-                ? 'inset 1px 1px 0 #404040, inset -1px -1px 0 #D4D0C8'
-                : 'inset 1px 1px 0 #808080',
-            }
-          : isDefault
-            ? {
-                border: '1px solid #000',
-                boxShadow: 'inset 1px 1px 0 #FFF, inset -1px -1px 0 #404040, inset 2px 2px 0 #D4D0C8, inset -2px -2px 0 #808080',
-              }
-            : {
-                border: '1px solid', borderColor: '#FFF #404040 #404040 #FFF',
-                boxShadow: 'inset 1px 1px 0 #D4D0C8, inset -1px -1px 0 #808080',
-              }),
+        width: '100%',
+        height: '100%',
+        background: active ? xpTheme.button.activeBg : xpTheme.button.background,
+        cursor: 'var(--win2k-cursor)',
+        border: `1px solid ${isDefault ? xpTheme.button.defaultBorder : xpTheme.button.border}`,
+        boxShadow: active
+          ? `inset 1px 1px 0 ${xpTheme.button.shadow}`
+          : `inset 1px 1px 0 ${xpTheme.button.highlight}, inset -1px -1px 0 ${xpTheme.button.shadow}`,
         font: fontCSS, padding: 0,
         ...(disabled ? disabledTextStyle : fontColor ? { color: fontColor } : {}),
       }}>
