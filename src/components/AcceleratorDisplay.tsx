@@ -11,10 +11,10 @@ export function AcceleratorDisplay({ accelerators }: AcceleratorDisplayProps) {
         const idText = accel.name ? `"${accel.name}"` : `#${accel.id}`;
         return (
           <div key={i} class="w-full mb-3">
-            <div class="text-[11px] text-gray-400 mb-1">Accelerator Table {idText}</div>
+            <div class="text-[11px] text-gray-400 mb-1">Table des accélérateurs {idText}</div>
             <table class="data-table">
               <thead>
-                <tr><th>Key</th><th>Command ID</th></tr>
+                <tr><th>Touche</th><th>ID de commande</th></tr>
               </thead>
               <tbody>
                 {accel.entries.map((e, j) => (

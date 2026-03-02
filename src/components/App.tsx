@@ -254,7 +254,7 @@ export function App() {
     })),
     ...(showWelcome ? [{
       id: welcomeId.current,
-      title: 'Welcome',
+      title: 'Bienvenue',
       iconUrl: null as string | null | undefined,
       minimized: minimizedApps.has(welcomeId.current),
     }] : []),
@@ -348,11 +348,11 @@ export function App() {
           setFocusedAppId(null);
         }}
         onResetToDefault={() => setConfirmDialog({
-          text: 'This will remove all files and reset to the default state. Continue?',
+          text: 'Cette action supprimera tous les fichiers et réinitialisera l\'application à son état par défaut. Continuer ?',
           onYes: () => { localStorage.clear(); indexedDB.deleteDatabase('exeviewer'); location.reload(); },
         })}
         onShutDown={() => setConfirmDialog({
-          text: 'Are you sure you want to shut down?',
+          text: 'Voulez-vous vraiment éteindre ?',
           onYes: () => { setConfirmDialog(null); window.location.href = 'https://github.com/lqs/retrotick'; },
         })}
       />

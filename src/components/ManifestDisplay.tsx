@@ -12,7 +12,7 @@ export function ManifestDisplay({ manifests }: ManifestDisplayProps) {
         const idText = m.name ? `"${m.name}"` : `#${m.id}`;
         return (
           <div key={i} class="text-card">
-            <div class="text-[11px] text-gray-400 mb-1.5">Manifest {idText}</div>
+            <div class="text-[11px] text-gray-400 mb-1.5">Manifeste {idText}</div>
             <pre lang={langToHtmlLang(m.languageId) || undefined}>{m.text}</pre>
           </div>
         );

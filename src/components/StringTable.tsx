@@ -9,7 +9,7 @@ export function StringTable({ strings }: StringTableProps) {
   return (
     <table class="data-table">
       <thead>
-        <tr><th>ID</th><th>String</th></tr>
+        <tr><th>ID</th><th>Chaîne</th></tr>
       </thead>
       <tbody>
         {strings.map((s, i) => (

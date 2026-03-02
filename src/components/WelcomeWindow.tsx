@@ -12,14 +12,14 @@ interface ExampleGroup {
 }
 
 const GROUPS: ExampleGroup[] = [
-  { label: 'Games', items: [
+  { label: 'Jeux', items: [
     { name: 'cards.dll', description: 'Cards (DLL)' },
     { name: 'freecell.exe', description: 'FreeCell' },
     { name: 'ski32.exe', description: 'SkiFree' },
     { name: 'sol.exe', description: 'Solitaire' },
     { name: 'winmine.exe', description: 'Minesweeper' },
   ]},
-  { label: 'Programs', items: [
+  { label: 'Programmes', items: [
     { name: 'calc.exe', description: 'Calculator' },
     { name: 'clock.exe', description: 'Clock' },
     { name: 'cmd.exe', description: 'Command Prompt' },
@@ -30,7 +30,7 @@ const GROUPS: ExampleGroup[] = [
     { name: 'taskmgr.exe', description: 'Task Manager' },
     { name: 'welcome95.exe', description: 'Welcome to Windows 95' },
   ]},
-  { label: 'Screen Savers', items: [
+  { label: 'Écrans de veille', items: [
     { name: 'ssmaze.scr', description: '3D Maze' },
     { name: 'sspipes.scr', description: '3D Pipes' },
     { name: 'ssbezier.scr', description: 'Bezier' },
@@ -89,7 +89,7 @@ export function WelcomeWindow({ onClose, onFocus, onMinimize, zIndex, focused, m
     <div style={{ position: 'absolute', inset: 0, zIndex, display: minimized ? 'none' : undefined, pointerEvents: 'none' }} onPointerDown={onFocus}>
       <div style={{ pointerEvents: 'auto', display: 'inline-block' }}>
         <Window
-          title="Welcome"
+          title="Bienvenue"
           style={WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX}
           clientW={420}
           focused={focused}
@@ -101,10 +101,10 @@ export function WelcomeWindow({ onClose, onFocus, onMinimize, zIndex, focused, m
         >
         <div style={{ background: '#D4D0C8', padding: '10px 12px' }}>
           <div style={{ fontSize: '16px', fontFamily: 'Tahoma, sans-serif', fontWeight: 'bold', marginBottom: '4px', lineHeight: '1.4', color: '#000', textShadow: '1px 1px 0 #FFF, -1px -1px 0 #808080' }}>
-            Welcome to RetroTick
+            Bienvenue sur RetroTick
           </div>
           <div style={{ font: FONT, marginBottom: '4px', lineHeight: '1.4' }}>
-            Drag and drop any EXE or DLL onto the desktop, or add these example programs:
+            Glissez-déposez un EXE ou une DLL sur le bureau, ou ajoutez ces programmes d'exemple :
           </div>
           <div style={{ borderTop: '1px solid #808080', borderBottom: '1px solid #FFF', margin: '6px 0 5px' }} />
           <div style={{ display: 'flex', gap: '12px' }}>
@@ -118,7 +118,7 @@ export function WelcomeWindow({ onClose, onFocus, onMinimize, zIndex, focused, m
                       <span>{ex.description}</span>
                       {st === 'loading' && <span style={{ color: '#808080', marginLeft: '3px' }}>...</span>}
                       {st === 'done' && <span style={{ color: '#008000', marginLeft: '3px' }}>{'\u2713'}</span>}
-                      {st === 'error' && <span style={{ color: '#C00000', marginLeft: '3px' }}>failed</span>}
+                      {st === 'error' && <span style={{ color: '#C00000', marginLeft: '3px' }}>échec</span>}
                     </div>
                   );
                 })}
@@ -128,11 +128,11 @@ export function WelcomeWindow({ onClose, onFocus, onMinimize, zIndex, focused, m
           <div style={{ borderTop: '1px solid #808080', borderBottom: '1px solid #FFF', margin: '6px 0 5px' }} />
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ font: FONT_SMALL, color: '#808080', lineHeight: '1.3', flex: 1, marginRight: '12px' }}>
-              These programs are property of their respective owners and are provided for demonstration only.
+              Ces programmes sont la propriété de leurs détenteurs respectifs et sont fournis uniquement à des fins de démonstration.
             </div>
             <div style={{ width: '100px', height: '23px', flexShrink: 0 }} onClick={downloading || allDone ? undefined : downloadAll}>
               <Button fontCSS={FONT} isDefault disabled={downloading || allDone}>
-                {downloading ? 'Adding...' : allDone ? 'All Added' : 'Add All'}
+                {downloading ? 'Ajout...' : allDone ? 'Tout ajouté' : 'Tout ajouter'}
               </Button>
             </div>
           </div>

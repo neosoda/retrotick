@@ -8,11 +8,11 @@ export function ExportTableDisplay({ exports: exp }: ExportTableDisplayProps) {
   return (
     <div class="w-full mb-3">
       <div class="text-[11px] text-gray-400 mb-1">
-        {exp.dll} — {exp.functions.length} function(s)
+        {exp.dll} — {exp.functions.length} fonction(s)
       </div>
       <table class="data-table">
         <thead>
-          <tr><th>Ordinal</th><th>Name</th><th>RVA</th><th>Forwarded To</th></tr>
+          <tr><th>Ordinal</th><th>Nom</th><th>RVA</th><th>Redirigée vers</th></tr>
         </thead>
         <tbody>
           {exp.functions.map((fn, i) => (

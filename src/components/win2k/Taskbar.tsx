@@ -105,17 +105,17 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
             fontWeight: 'bold',
           }}
         >
-          <span style={{ lineHeight: '16px' }}>Start</span>
+          <span style={{ lineHeight: '16px' }}>Démarrer</span>
         </div>
         {startOpen && startPos && (
           <div onPointerDown={(e: Event) => e.stopPropagation()}>
             <MenuDropdown
               items={[
-                { id: 1, text: 'Welcome', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
-                { id: 4, text: 'GitHub Project', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
+                { id: 1, text: 'Bienvenue', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
+                { id: 4, text: 'Projet GitHub', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
                 { id: 0, text: '', isSeparator: true, isChecked: false, isGrayed: false, isDefault: false, children: null },
-                { id: 3, text: 'Reset to Default...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
-                { id: 2, text: 'Shut Down...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
+                { id: 3, text: 'Réinitialiser...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
+                { id: 2, text: 'Éteindre...', isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null },
               ]}
               x={startPos.x}
               y={startPos.y}
@@ -161,7 +161,7 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
                 <img src={app.iconUrl} style={{ width: '16px', height: '16px', flexShrink: 0, imageRendering: 'pixelated' }} />
               )}
               <span lang={app.lang} style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', minWidth: 0, lineHeight: '16px' }}>
-                {app.title || 'Untitled'}
+                {app.title || 'Sans titre'}
               </span>
             </div>
           );
@@ -185,7 +185,7 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
           id, text, isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null, ...opts,
         });
         const items: MenuItem[] = [
-          mi(CMD_MINIMIZE_ALL, 'Minimize All Windows', { isGrayed: runningApps.length === 0 }),
+          mi(CMD_MINIMIZE_ALL, 'Réduire toutes les fenêtres', { isGrayed: runningApps.length === 0 }),
         ];
         return (
           <div onPointerDown={(e: Event) => e.stopPropagation()}>
@@ -209,10 +209,10 @@ export function Taskbar({ runningApps, focusedAppId, onActivateApp, onMinimizeAp
           id, text, isSeparator: false, isChecked: false, isGrayed: false, isDefault: false, children: null, ...opts,
         });
         const items: MenuItem[] = [
-          mi(CMD_RESTORE, 'Restore', { isGrayed: !contextApp.minimized }),
-          mi(CMD_MINIMIZE, 'Minimize', { isGrayed: !!contextApp.minimized }),
+          mi(CMD_RESTORE, 'Restaurer', { isGrayed: !contextApp.minimized }),
+          mi(CMD_MINIMIZE, 'Réduire', { isGrayed: !!contextApp.minimized }),
           { id: 0, text: '', isSeparator: true, isChecked: false, isGrayed: false, isDefault: false, children: null },
-          mi(CMD_CLOSE, 'Close', { isDefault: true }),
+          mi(CMD_CLOSE, 'Fermer', { isDefault: true }),
         ];
         return (
           <div onPointerDown={(e: Event) => e.stopPropagation()}>

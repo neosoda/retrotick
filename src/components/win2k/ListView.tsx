@@ -35,7 +35,7 @@ export function ListView({ style, width, height, fontCSS }: ListViewProps) {
             whiteSpace: 'nowrap', overflow: 'hidden',
             fontSize: '11px',
           }}>
-            Name
+            Nom
           </div>
           {width > 120 && (
             <div style={{
@@ -47,7 +47,7 @@ export function ListView({ style, width, height, fontCSS }: ListViewProps) {
               whiteSpace: 'nowrap', overflow: 'hidden',
               fontSize: '11px',
             }}>
-              Size
+              Taille
             </div>
           )}
         </div>
