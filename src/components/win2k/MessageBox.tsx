@@ -68,11 +68,11 @@ function getMsgBoxButtons(type: number): { label: string; id: number }[] {
   const buttons = type & 0x0F;
   switch (buttons) {
     case MB_OK: return [{ label: 'OK', id: IDOK }];
-    case MB_OKCANCEL: return [{ label: 'OK', id: IDOK }, { label: 'Cancel', id: IDCANCEL }];
-    case MB_YESNO: return [{ label: 'Yes', id: IDYES }, { label: 'No', id: IDNO }];
-    case MB_YESNOCANCEL: return [{ label: 'Yes', id: IDYES }, { label: 'No', id: IDNO }, { label: 'Cancel', id: IDCANCEL }];
-    case MB_ABORTRETRYIGNORE: return [{ label: 'Abort', id: IDABORT }, { label: 'Retry', id: IDRETRY }, { label: 'Ignore', id: IDIGNORE }];
-    case MB_RETRYCANCEL: return [{ label: 'Retry', id: IDRETRY }, { label: 'Cancel', id: IDCANCEL }];
+    case MB_OKCANCEL: return [{ label: 'OK', id: IDOK }, { label: 'Annuler', id: IDCANCEL }];
+    case MB_YESNO: return [{ label: 'Oui', id: IDYES }, { label: 'Non', id: IDNO }];
+    case MB_YESNOCANCEL: return [{ label: 'Oui', id: IDYES }, { label: 'Non', id: IDNO }, { label: 'Annuler', id: IDCANCEL }];
+    case MB_ABORTRETRYIGNORE: return [{ label: 'Abandonner', id: IDABORT }, { label: 'Réessayer', id: IDRETRY }, { label: 'Ignorer', id: IDIGNORE }];
+    case MB_RETRYCANCEL: return [{ label: 'Réessayer', id: IDRETRY }, { label: 'Annuler', id: IDCANCEL }];
     default: return [{ label: 'OK', id: IDOK }];
   }
 }
@@ -90,7 +90,7 @@ export function MessageBox({ caption, text, type, icon, onDismiss, focused = tru
   flashTrigger?: number;
   parentRef?: { current: HTMLDivElement | null };
 }) {
-  const buttons = type != null ? getMsgBoxButtons(type) : [{ label: 'Close', id: IDOK }];
+  const buttons = type != null ? getMsgBoxButtons(type) : [{ label: 'Fermer', id: IDOK }];
   const defaultId = buttons[0].id;
   const [initialPos, setInitialPos] = useState<{ x: number; y: number } | undefined>(undefined);
   const [visible, setVisible] = useState(false);

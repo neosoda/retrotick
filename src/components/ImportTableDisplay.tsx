@@ -31,12 +31,12 @@ function ImportDll({ imp }: { imp: ImportResult }) {
       {open && (
         <table class="data-table mt-1">
           <thead>
-            <tr><th>Function</th><th>Ordinal</th><th>Hint</th></tr>
+            <tr><th>Fonction</th><th>Ordinal</th><th>Indice</th></tr>
           </thead>
           <tbody>
             {imp.functions.map((fn, j) => (
               <tr key={j}>
-                <td>{fn.name ?? '(by ordinal)'}</td>
+                <td>{fn.name ?? '(par ordinal)'}</td>
                 <td>{fn.ordinal != null ? fn.ordinal : ''}</td>
                 <td>{fn.hint}</td>
               </tr>

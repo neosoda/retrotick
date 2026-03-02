@@ -36,17 +36,17 @@ function buildSections(data: LoadedData): Section[] {
   add('imports', 'Imports', data.imports.length);
   add('exports', 'Exports', data.exports?.functions.length ?? 0);
   add('bitmaps', 'Bitmaps', data.bitmaps.length);
-  add('icons', 'Icons', data.icons.length);
-  add('cursors', 'Cursors', data.cursors.length);
+  add('icons', 'Icônes', data.icons.length);
+  add('cursors', 'Curseurs', data.cursors.length);
   add('menus', 'Menus', data.menus.length);
-  add('delphiForms', 'Delphi Forms', data.delphiForms.length);
-  add('dialogs', 'Dialogs', data.dialogs.length);
-  add('accelerators', 'Accelerators', data.accelerators.length);
+  add('delphiForms', 'Formulaires Delphi', data.delphiForms.length);
+  add('dialogs', 'Boîtes de dialogue', data.dialogs.length);
+  add('accelerators', 'Accélérateurs', data.accelerators.length);
   add('avi', 'AVI', data.aviResources.length);
   add('wav', 'WAV', data.wavResources.length);
-  add('versionInfo', 'Version Info', data.versionInfos.length);
-  add('manifests', 'Manifests', data.manifests.length);
-  add('strings', 'String Table', data.strings.length);
+  add('versionInfo', 'Informations de version', data.versionInfos.length);
+  add('manifests', 'Manifestes', data.manifests.length);
+  add('strings', 'Table de chaînes', data.strings.length);
   return sections;
 }
 
@@ -176,7 +176,7 @@ export function ResourceViewerWindow({
       onPointerDown={onFocus}
     >
       <Window
-        title={`Resource Viewer - ${exeName}`}
+        title={`Visionneuse de ressources - ${exeName}`}
         style={WINDOW_STYLE}
         clientW={clientSize.w}
         clientH={clientSize.h}
@@ -209,7 +209,7 @@ export function ResourceViewerWindow({
               }}
               onClick={() => onRunExe(data.arrayBuffer, data.peInfo)}
             >
-              Run
+              Exécuter
             </button>
           )}
         </div>

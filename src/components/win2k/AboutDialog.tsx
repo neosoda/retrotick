@@ -35,7 +35,7 @@ export function AboutDialog({ caption, extraInfo, otherText, onDismiss, focused 
 
   return (
     <div ref={measureRef} style={{ visibility: visible ? 'visible' : 'hidden', position: 'absolute', font: FONT }}>
-      <Window title={`About ${caption}`} style={WS_CAPTION | WS_SYSMENU} focused={focused} flashTrigger={flashTrigger} draggable initialPos={initialPos} onClose={onDismiss}>
+      <Window title={`À propos de ${caption}`} style={WS_CAPTION | WS_SYSMENU} focused={focused} flashTrigger={flashTrigger} draggable initialPos={initialPos} onClose={onDismiss}>
         <div style={{ background: '#D4D0C8', width: '340px' }}>
           {/* Header band — Windows 2000 style blue banner */}
           <div style={{
@@ -57,7 +57,7 @@ export function AboutDialog({ caption, extraInfo, otherText, onDismiss, focused 
             {/* System info line — Win2K style */}
             <div style={{ borderTop: '1px solid #808080', borderBottom: '1px solid #FFF', margin: '6px 0' }} />
             <div style={{ fontSize: '11px', color: '#444', lineHeight: '1.4' }}>
-              {'deviceMemory' in navigator && `Physical memory available to Windows: ${(navigator as Navigator & { deviceMemory: number }).deviceMemory * 1024 * 1024} KB`}
+              {'deviceMemory' in navigator && `Mémoire physique disponible pour Windows : ${(navigator as Navigator & { deviceMemory: number }).deviceMemory * 1024 * 1024} KB`}
             </div>
           </div>
           {/* OK button */}
@@ -71,4 +71,3 @@ export function AboutDialog({ caption, extraInfo, otherText, onDismiss, focused 
     </div>
   );
 }
-

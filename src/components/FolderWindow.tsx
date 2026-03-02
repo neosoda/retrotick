@@ -186,10 +186,10 @@ export function FolderWindow({
 
   async function handleNewFolder() {
     setBgContextMenu(null);
-    let name = 'New Folder';
+    let name = 'Nouveau dossier';
     let suffix = 0;
     const existingNames = new Set(items.map(i => i.displayName));
-    while (existingNames.has(name)) { suffix++; name = `New Folder (${suffix})`; }
+    while (existingNames.has(name)) { suffix++; name = `Nouveau dossier (${suffix})`; }
     const fullPath = prefix + name + '/';
     await addFolder(fullPath);
     await loadItems();
@@ -330,7 +330,7 @@ export function FolderWindow({
             ))}
             {items.length === 0 && (
               <div class="flex items-center justify-center w-full text-gray-400 text-sm" style={{ minHeight: '200px' }}>
-                This folder is empty
+                Ce dossier est vide
               </div>
             )}
           </div>
@@ -343,7 +343,7 @@ export function FolderWindow({
         return (
           <div onClick={(e: Event) => e.stopPropagation()}>
             <MenuDropdown
-              items={[mi(CMD_NEW_FOLDER, 'New Folder'), mi(CMD_REFRESH, 'Refresh')]}
+              items={[mi(CMD_NEW_FOLDER, 'Nouveau dossier'), mi(CMD_REFRESH, 'Actualiser')]}
               x={bgContextMenu.x} y={bgContextMenu.y}
               onCommand={(id) => {
                 setBgContextMenu(null);
@@ -361,12 +361,12 @@ export function FolderWindow({
         const CMD_OPEN = 1, CMD_RENAME = 2, CMD_DELETE = 3, CMD_VIEW = 4;
         const { item } = contextMenu;
         const menuItems: MenuItem[] = [
-          mi(CMD_OPEN, 'Open', { isDefault: true }),
+          mi(CMD_OPEN, 'Ouvrir', { isDefault: true }),
         ];
-        if (!item.isFolder) menuItems.push(mi(CMD_VIEW, 'View Resources'));
-        menuItems.push(mi(CMD_RENAME, 'Rename'));
+        if (!item.isFolder) menuItems.push(mi(CMD_VIEW, 'Afficher les ressources'));
+        menuItems.push(mi(CMD_RENAME, 'Renommer'));
         menuItems.push({ id: 0, text: '', isSeparator: true, isChecked: false, isGrayed: false, isDefault: false, children: null });
-        menuItems.push(mi(CMD_DELETE, 'Delete'));
+        menuItems.push(mi(CMD_DELETE, 'Supprimer'));
         return (
           <div onClick={(e: Event) => e.stopPropagation()}>
             <MenuDropdown
@@ -394,7 +394,7 @@ export function FolderWindow({
       {confirmDelete && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onPointerDown={(e) => { e.preventDefault(); setConfirmFlash(c => c + 1); }} onContextMenu={(e: Event) => e.preventDefault()}>
           <div onPointerDown={(e) => e.stopPropagation()} style={{ font: '11px/1 "Tahoma", "MS Sans Serif", sans-serif', minWidth: '280px', maxWidth: '400px' }}>
-            <Window title={isFolder(confirmDelete) ? 'Confirm Folder Delete' : 'Confirm File Delete'} style={WS_CAPTION | WS_SYSMENU} focused={true} draggable flashTrigger={confirmFlash} onClose={() => setConfirmDelete(null)}>
+            <Window title={isFolder(confirmDelete) ? 'Confirmer la suppression du dossier' : 'Confirmer la suppression du fichier'} style={WS_CAPTION | WS_SYSMENU} focused={true} draggable flashTrigger={confirmFlash} onClose={() => setConfirmDelete(null)}>
               <div style={{ padding: '12px 12px 8px', display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
                 <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
                   <circle cx="16" cy="16" r="14" fill="#FFFF00" stroke="#000" stroke-width="1"/>
@@ -403,16 +403,16 @@ export function FolderWindow({
                 </svg>
                 <div style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                   {isFolder(confirmDelete)
-                    ? `Are you sure you want to delete '${displayName(confirmDelete)}' and all its contents?`
-                    : `Are you sure you want to delete '${displayName(confirmDelete)}'?`}
+                    ? `Voulez-vous vraiment supprimer '${displayName(confirmDelete)}' et tout son contenu ?`
+                    : `Voulez-vous vraiment supprimer '${displayName(confirmDelete)}' ?`}
                 </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'center', gap: '6px', padding: '4px 12px 8px' }}>
                 <div style={{ width: '75px', height: '23px', cursor: 'var(--win2k-cursor)' }} onClick={() => handleDeleteItem(confirmDelete)}>
-                  <Button fontCSS='11px/1 "Tahoma", "MS Sans Serif", sans-serif' isDefault>Yes</Button>
+                  <Button fontCSS='11px/1 "Tahoma", "MS Sans Serif", sans-serif' isDefault>Oui</Button>
                 </div>
                 <div style={{ width: '75px', height: '23px', cursor: 'var(--win2k-cursor)' }} onClick={() => setConfirmDelete(null)}>
-                  <Button fontCSS='11px/1 "Tahoma", "MS Sans Serif", sans-serif'>No</Button>
+                  <Button fontCSS='11px/1 "Tahoma", "MS Sans Serif", sans-serif'>Non</Button>
                 </div>
               </div>
             </Window>
