@@ -275,6 +275,8 @@ export class Emulator {
   consoleCursorX = 0;
   consoleCursorY = 0;
   consoleAttr = 0x07; // light gray on black
+  consoleCursorSize = 25;
+  consoleCursorVisible = true;
   consoleTitle = '';
   consoleMode = 0x0003; // ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT
   consoleInputMode = 0x0003;

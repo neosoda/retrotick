@@ -437,6 +437,24 @@ export function registerWinmm(emu: Emulator): void {
   });
   winmm.register('timeGetTime', 0, () => (Date.now() & 0xFFFFFFFF) >>> 0);
 
+  // timeGetDevCaps(lpTimeCaps, uSize) → MMRESULT
+  // TIMECAPS: wPeriodMin(4), wPeriodMax(4) = 8 bytes
+  winmm.register('timeGetDevCaps', 2, () => {
+    const lpTimeCaps = emu.readArg(0);
+    const uSize = emu.readArg(1);
+    if (lpTimeCaps && uSize >= 8) {
+      emu.memory.writeU32(lpTimeCaps, 1);      // wPeriodMin = 1ms
+      emu.memory.writeU32(lpTimeCaps + 4, 1000000); // wPeriodMax
+    }
+    return 0; // TIMERR_NOERROR
+  });
+
+  // timeBeginPeriod(uPeriod) → MMRESULT
+  winmm.register('timeBeginPeriod', 1, () => 0);
+
+  // timeEndPeriod(uPeriod) → MMRESULT
+  winmm.register('timeEndPeriod', 1, () => 0);
+
   // MCI — stub: return 0 (success, no-op)
   winmm.register('mciSendCommandA', 4, () => 0);
   winmm.register('mciSendCommandW', 4, () => 0);

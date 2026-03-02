@@ -267,6 +267,276 @@ export function registerConsole(emu: Emulator): void {
 
   kernel32.register('SetConsoleCtrlHandler', 2, () => 1);
 
+  // GetNumberOfConsoleInputEvents(hConsoleInput, lpcNumberOfEvents) → BOOL
+  kernel32.register('GetNumberOfConsoleInputEvents', 2, () => {
+    const _hConsole = emu.readArg(0);
+    const lpEvents = emu.readArg(1);
+    if (lpEvents) emu.memory.writeU32(lpEvents, emu.consoleInputBuffer.length);
+    return 1;
+  });
+
+  // PeekConsoleInputA(hConsoleInput, lpBuffer, nLength, lpNumberOfEventsRead) → BOOL
+  kernel32.register('PeekConsoleInputA', 4, () => {
+    const _hConsole = emu.readArg(0);
+    const lpBuffer = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const lpEventsRead = emu.readArg(3);
+    const count = Math.min(nLength, emu.consoleInputBuffer.length);
+    for (let i = 0; i < count; i++) {
+      const evt = emu.consoleInputBuffer[i];
+      const base = lpBuffer + i * 20;
+      for (let j = 0; j < 20; j++) emu.memory.writeU8(base + j, 0);
+      const KEY_EVENT = 0x0001;
+      emu.memory.writeU16(base, KEY_EVENT);
+      emu.memory.writeU32(base + 4, 1); // bKeyDown
+      emu.memory.writeU16(base + 8, 1); // wRepeatCount
+      emu.memory.writeU16(base + 10, evt.vk);
+      emu.memory.writeU16(base + 12, evt.scan);
+      emu.memory.writeU8(base + 14, evt.char & 0xFF);
+    }
+    if (lpEventsRead) emu.memory.writeU32(lpEventsRead, count);
+    return 1;
+  });
+
+  // WriteConsoleOutputCharacterA(hConsoleOutput, lpCharacter, nLength, dwWriteCoord, lpNumberOfCharsWritten) → BOOL
+  kernel32.register('WriteConsoleOutputCharacterA', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpChar = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const dwCoord = emu.readArg(3);
+    const lpWritten = emu.readArg(4);
+    let x = dwCoord & 0xFFFF;
+    let y = (dwCoord >>> 16) & 0xFFFF;
+    let written = 0;
+    for (let i = 0; i < nLength && y < 25; i++) {
+      const idx = y * 80 + x;
+      if (idx >= 0 && idx < emu.consoleBuffer.length) {
+        emu.consoleBuffer[idx].char = emu.memory.readU8(lpChar + i);
+      }
+      x++; if (x >= 80) { x = 0; y++; }
+      written++;
+    }
+    if (lpWritten) emu.memory.writeU32(lpWritten, written);
+    emu.onConsoleOutput?.();
+    return 1;
+  });
+
+  // WriteConsoleOutputCharacterW — same but reads UTF-16
+  kernel32.register('WriteConsoleOutputCharacterW', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpChar = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const dwCoord = emu.readArg(3);
+    const lpWritten = emu.readArg(4);
+    let x = dwCoord & 0xFFFF;
+    let y = (dwCoord >>> 16) & 0xFFFF;
+    let written = 0;
+    for (let i = 0; i < nLength && y < 25; i++) {
+      const idx = y * 80 + x;
+      if (idx >= 0 && idx < emu.consoleBuffer.length) {
+        emu.consoleBuffer[idx].char = emu.memory.readU16(lpChar + i * 2);
+      }
+      x++; if (x >= 80) { x = 0; y++; }
+      written++;
+    }
+    if (lpWritten) emu.memory.writeU32(lpWritten, written);
+    emu.onConsoleOutput?.();
+    return 1;
+  });
+
+  // WriteConsoleOutputAttribute(hConsoleOutput, lpAttribute, nLength, dwWriteCoord, lpNumberOfAttrsWritten) → BOOL
+  kernel32.register('WriteConsoleOutputAttribute', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpAttr = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const dwCoord = emu.readArg(3);
+    const lpWritten = emu.readArg(4);
+    let x = dwCoord & 0xFFFF;
+    let y = (dwCoord >>> 16) & 0xFFFF;
+    let written = 0;
+    for (let i = 0; i < nLength && y < 25; i++) {
+      const idx = y * 80 + x;
+      if (idx >= 0 && idx < emu.consoleBuffer.length) {
+        emu.consoleBuffer[idx].attr = emu.memory.readU16(lpAttr + i * 2) & 0xFF;
+      }
+      x++; if (x >= 80) { x = 0; y++; }
+      written++;
+    }
+    if (lpWritten) emu.memory.writeU32(lpWritten, written);
+    emu.onConsoleOutput?.();
+    return 1;
+  });
+
+  // WriteConsoleOutputA(hConsoleOutput, lpBuffer, dwBufferSize, dwBufferCoord, lpWriteRegion) → BOOL
+  kernel32.register('WriteConsoleOutputA', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpBuffer = emu.readArg(1);
+    const dwBufferSize = emu.readArg(2);
+    const dwBufferCoord = emu.readArg(3);
+    const lpWriteRegion = emu.readArg(4);
+    const bufW = dwBufferSize & 0xFFFF;
+    const bufH = (dwBufferSize >>> 16) & 0xFFFF;
+    const srcX = dwBufferCoord & 0xFFFF;
+    const srcY = (dwBufferCoord >>> 16) & 0xFFFF;
+    const dstLeft = emu.memory.readI16(lpWriteRegion);
+    const dstTop = emu.memory.readI16(lpWriteRegion + 2);
+    const dstRight = emu.memory.readI16(lpWriteRegion + 4);
+    const dstBottom = emu.memory.readI16(lpWriteRegion + 6);
+    // CHAR_INFO is 4 bytes: Char(2) + Attributes(2)
+    for (let row = dstTop; row <= dstBottom && (row - dstTop + srcY) < bufH; row++) {
+      for (let col = dstLeft; col <= dstRight && (col - dstLeft + srcX) < bufW; col++) {
+        const bufIdx = ((row - dstTop + srcY) * bufW + (col - dstLeft + srcX)) * 4;
+        const ch = emu.memory.readU8(lpBuffer + bufIdx); // AsciiChar
+        const attr = emu.memory.readU16(lpBuffer + bufIdx + 2);
+        const idx = row * 80 + col;
+        if (idx >= 0 && idx < emu.consoleBuffer.length) {
+          emu.consoleBuffer[idx].char = ch;
+          emu.consoleBuffer[idx].attr = attr & 0xFF;
+        }
+      }
+    }
+    emu.onConsoleOutput?.();
+    return 1;
+  });
+
+  // ReadConsoleOutputA(hConsoleOutput, lpBuffer, dwBufferSize, dwBufferCoord, lpReadRegion) → BOOL
+  kernel32.register('ReadConsoleOutputA', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpBuffer = emu.readArg(1);
+    const dwBufferSize = emu.readArg(2);
+    const dwBufferCoord = emu.readArg(3);
+    const lpReadRegion = emu.readArg(4);
+    const bufW = dwBufferSize & 0xFFFF;
+    const bufH = (dwBufferSize >>> 16) & 0xFFFF;
+    const srcX = dwBufferCoord & 0xFFFF;
+    const srcY = (dwBufferCoord >>> 16) & 0xFFFF;
+    const left = emu.memory.readI16(lpReadRegion);
+    const top = emu.memory.readI16(lpReadRegion + 2);
+    const right = emu.memory.readI16(lpReadRegion + 4);
+    const bottom = emu.memory.readI16(lpReadRegion + 6);
+    for (let row = top; row <= bottom && (row - top + srcY) < bufH; row++) {
+      for (let col = left; col <= right && (col - left + srcX) < bufW; col++) {
+        const bufIdx = ((row - top + srcY) * bufW + (col - left + srcX)) * 4;
+        const idx = row * 80 + col;
+        if (idx >= 0 && idx < emu.consoleBuffer.length) {
+          emu.memory.writeU16(lpBuffer + bufIdx, emu.consoleBuffer[idx].char);
+          emu.memory.writeU16(lpBuffer + bufIdx + 2, emu.consoleBuffer[idx].attr);
+        } else {
+          emu.memory.writeU16(lpBuffer + bufIdx, 0x20);
+          emu.memory.writeU16(lpBuffer + bufIdx + 2, 0x07);
+        }
+      }
+    }
+    return 1;
+  });
+
+  // ReadConsoleOutputCharacterA(hConsoleOutput, lpCharacter, nLength, dwReadCoord, lpNumberOfCharsRead) → BOOL
+  kernel32.register('ReadConsoleOutputCharacterA', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpChar = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const dwCoord = emu.readArg(3);
+    const lpRead = emu.readArg(4);
+    let x = dwCoord & 0xFFFF;
+    let y = (dwCoord >>> 16) & 0xFFFF;
+    let count = 0;
+    for (let i = 0; i < nLength && y < 25; i++) {
+      const idx = y * 80 + x;
+      const ch = (idx >= 0 && idx < emu.consoleBuffer.length) ? emu.consoleBuffer[idx].char & 0xFF : 0x20;
+      emu.memory.writeU8(lpChar + i, ch);
+      x++; if (x >= 80) { x = 0; y++; }
+      count++;
+    }
+    if (lpRead) emu.memory.writeU32(lpRead, count);
+    return 1;
+  });
+
+  // ReadConsoleOutputAttribute(hConsoleOutput, lpAttribute, nLength, dwReadCoord, lpNumberOfAttrsRead) → BOOL
+  kernel32.register('ReadConsoleOutputAttribute', 5, () => {
+    const _hConsole = emu.readArg(0);
+    const lpAttr = emu.readArg(1);
+    const nLength = emu.readArg(2);
+    const dwCoord = emu.readArg(3);
+    const lpRead = emu.readArg(4);
+    let x = dwCoord & 0xFFFF;
+    let y = (dwCoord >>> 16) & 0xFFFF;
+    let count = 0;
+    for (let i = 0; i < nLength && y < 25; i++) {
+      const idx = y * 80 + x;
+      const attr = (idx >= 0 && idx < emu.consoleBuffer.length) ? emu.consoleBuffer[idx].attr : 0x07;
+      emu.memory.writeU16(lpAttr + i * 2, attr);
+      x++; if (x >= 80) { x = 0; y++; }
+      count++;
+    }
+    if (lpRead) emu.memory.writeU32(lpRead, count);
+    return 1;
+  });
+
+  // GetConsoleTitleA(lpConsoleTitle, nSize) → DWORD
+  kernel32.register('GetConsoleTitleA', 2, () => {
+    const lpTitle = emu.readArg(0);
+    const nSize = emu.readArg(1);
+    if (lpTitle && nSize > 0) {
+      const title = emu.consoleTitle;
+      const len = Math.min(title.length, nSize - 1);
+      for (let i = 0; i < len; i++) emu.memory.writeU8(lpTitle + i, title.charCodeAt(i) & 0xFF);
+      emu.memory.writeU8(lpTitle + len, 0);
+      return len;
+    }
+    return 0;
+  });
+
+  // SetConsoleCP(wCodePageID) → BOOL
+  kernel32.register('SetConsoleCP', 1, () => 1);
+
+  // SetConsoleOutputCP(wCodePageID) → BOOL
+  kernel32.register('SetConsoleOutputCP', 1, () => 1);
+
+  // GetConsoleCP() → UINT
+  kernel32.register('GetConsoleCP', 0, () => 437);
+
+  // SetConsoleScreenBufferSize(hConsoleOutput, dwSize) → BOOL
+  kernel32.register('SetConsoleScreenBufferSize', 2, () => 1);
+
+  // SetConsoleWindowInfo(hConsoleOutput, bAbsolute, lpConsoleWindow) → BOOL
+  kernel32.register('SetConsoleWindowInfo', 3, () => 1);
+
+  // SetConsoleCursorInfo(hConsoleOutput, lpConsoleCursorInfo) → BOOL
+  kernel32.register('SetConsoleCursorInfo', 2, () => {
+    const _hConsole = emu.readArg(0);
+    const lpInfo = emu.readArg(1);
+    if (lpInfo) {
+      emu.consoleCursorSize = emu.memory.readU32(lpInfo);
+      emu.consoleCursorVisible = emu.memory.readU32(lpInfo + 4) !== 0;
+    }
+    return 1;
+  });
+
+  // GetConsoleCursorInfo(hConsoleOutput, lpConsoleCursorInfo) → BOOL
+  kernel32.register('GetConsoleCursorInfo', 2, () => {
+    const _hConsole = emu.readArg(0);
+    const lpInfo = emu.readArg(1);
+    if (lpInfo) {
+      emu.memory.writeU32(lpInfo, emu.consoleCursorSize ?? 25);
+      emu.memory.writeU32(lpInfo + 4, (emu.consoleCursorVisible ?? true) ? 1 : 0);
+    }
+    return 1;
+  });
+
+  // Beep(dwFreq, dwDuration) → BOOL
+  kernel32.register('Beep', 2, () => 1);
+
+  // SetFileApisToOEM() → void
+  kernel32.register('SetFileApisToOEM', 0, () => 0);
+
+  // Comm port stubs — no serial ports available
+  kernel32.register('GetCommModemStatus', 2, () => 0);
+  kernel32.register('ClearCommError', 3, () => 0);
+  kernel32.register('GetCommState', 2, () => 0);
+  kernel32.register('SetCommState', 2, () => 0);
+  kernel32.register('GetCommProperties', 2, () => 0);
+  kernel32.register('EscapeCommFunction', 2, () => 0);
+
   kernel32.register('ScrollConsoleScreenBufferW', 5, () => {
     const _hConsole = emu.readArg(0);
     const lpScrollRect = emu.readArg(1);

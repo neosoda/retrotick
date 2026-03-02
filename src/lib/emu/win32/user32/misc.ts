@@ -450,6 +450,28 @@ export function registerMisc(emu: Emulator): void {
     return 1; // LRESULT nonzero = success
   });
 
+  // CharUpperBuffA(lpsz, cchLength) → DWORD
+  user32.register('CharUpperBuffA', 2, () => {
+    const lpsz = emu.readArg(0);
+    const cchLength = emu.readArg(1);
+    for (let i = 0; i < cchLength; i++) {
+      const ch = emu.memory.readU8(lpsz + i);
+      if (ch >= 0x61 && ch <= 0x7A) emu.memory.writeU8(lpsz + i, ch - 0x20);
+    }
+    return cchLength;
+  });
+
+  // CharLowerBuffA(lpsz, cchLength) → DWORD
+  user32.register('CharLowerBuffA', 2, () => {
+    const lpsz = emu.readArg(0);
+    const cchLength = emu.readArg(1);
+    for (let i = 0; i < cchLength; i++) {
+      const ch = emu.memory.readU8(lpsz + i);
+      if (ch >= 0x41 && ch <= 0x5A) emu.memory.writeU8(lpsz + i, ch + 0x20);
+    }
+    return cchLength;
+  });
+
   // CharLowerBuffW(lpsz, cchLength) → DWORD (number of chars processed)
   user32.register('CharLowerBuffW', 2, () => {
     const lpsz = emu.readArg(0);
