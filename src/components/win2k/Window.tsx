@@ -14,9 +14,12 @@ function parseBgPos(bgPos: string): { x: number; y: number } {
   return { x: leftM ? parseInt(leftM[1]) : 0, y: topM ? parseInt(topM[1]) : 0 };
 }
 
-export function capBtnSvg(svgMarkup: string, bgPos: string, onClick?: () => void) {
+export function capBtnSvg(svgMarkup: string, bgPos: string, onClick?: () => void, variant: 'normal' | 'close' = 'normal') {
   const [pressed, setPressed] = useState(false);
   const encoded = encodeSvg(svgMarkup);
+  const bg = variant === 'close'
+    ? (pressed ? 'linear-gradient(to bottom, #d56f70, #b24848)' : 'linear-gradient(to bottom, #f29b9b, #cf5b5b)')
+    : (pressed ? 'linear-gradient(to bottom, #2f64c5, #4f8be6)' : 'linear-gradient(to bottom, #6ba5ff, #3f79d6)');
   // When pressed, shift the icon 1px right and 1px down
   const pos = pressed ? (() => { const p = parseBgPos(bgPos); return `top ${p.y + 1}px left ${p.x + 1}px`; })() : bgPos;
   return (
@@ -25,10 +28,11 @@ export function capBtnSvg(svgMarkup: string, bgPos: string, onClick?: () => void
       onPointerUp={() => { setPressed(false); onClick?.(); }}
       onPointerLeave={() => setPressed(false)}
       style={{
-        display: 'inline-block', width: '16px', height: '14px', background: '#D4D0C8',
+        display: 'inline-block', width: '21px', height: '18px', background: bg,
         border: '1px solid',
-        borderColor: pressed ? '#404040 #FFF #FFF #404040' : '#FFF #404040 #404040 #FFF',
-        boxShadow: pressed ? 'none' : 'inset 1px 1px 0 #D4D0C8, inset -1px -1px 0 #808080',
+        borderColor: pressed ? '#1a3f85 #5b91dd #8bc0ff #1a3f85' : '#cce0ff #174b9c #174b9c #cce0ff',
+        boxShadow: pressed ? 'inset 0 0 0 1px rgba(0,0,0,0.15)' : 'inset 0 1px 0 rgba(255,255,255,0.7)',
+        borderRadius: '3px',
         cursor: 'var(--win2k-cursor)',
         backgroundImage: `url("data:image/svg+xml,${encoded}")`,
         backgroundRepeat: 'no-repeat',
@@ -38,11 +42,11 @@ export function capBtnSvg(svgMarkup: string, bgPos: string, onClick?: () => void
   );
 }
 
-export const svgMin = "<svg width='6' height='2' xmlns='http://www.w3.org/2000/svg'><rect width='6' height='2' fill='#000'/></svg>";
-export const svgMax = "<svg width='9' height='9' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M0 0h9v9H0V0zm1 2h7v6H1V2z' fill='#000'/></svg>";
-export const svgRestore = "<svg width='9' height='9' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M2 0h7v7H7v2H0V2h2V0zm1 2h4v1H3v3H2V2h1zm-1 2h5v4H1V4h1zm0 1v2h4V5H2z' fill='#000'/></svg>";
-export const svgClose = "<svg width='8' height='7' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M0 0h2v1h1v1h2V1h1V0h2v1H7v1H6v1H5v1h1v1h1v1h1v1H6V6H5V5H3v1H2v1H0V6h1V5h1V4h1V3H2V2H1V1H0V0z' fill='#000'/></svg>";
-export const svgHelp = "<svg width='6' height='9' xmlns='http://www.w3.org/2000/svg'><path fill='#000' d='M0 1h2v2H0zM1 0h4v1H1zM4 1h2v2H4zM3 3h2v1H3zM2 4h2v2H2zM2 7h2v2H2z'/></svg>";
+export const svgMin = "<svg width='6' height='2' xmlns='http://www.w3.org/2000/svg'><rect width='6' height='2' fill='#fff'/></svg>";
+export const svgMax = "<svg width='9' height='9' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M0 0h9v9H0V0zm1 2h7v6H1V2z' fill='#fff'/></svg>";
+export const svgRestore = "<svg width='9' height='9' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M2 0h7v7H7v2H0V2h2V0zm1 2h4v1H3v3H2V2h1zm-1 2h5v4H1V4h1zm0 1v2h4V5H2z' fill='#fff'/></svg>";
+export const svgClose = "<svg width='8' height='7' xmlns='http://www.w3.org/2000/svg'><path fill-rule='evenodd' d='M0 0h2v1h1v1h2V1h1V0h2v1H7v1H6v1H5v1h1v1h1v1h1v1H6V6H5V5H3v1H2v1H0V6h1V5h1V4h1V3H2V2H1V1H0V0z' fill='#fff'/></svg>";
+export const svgHelp = "<svg width='6' height='9' xmlns='http://www.w3.org/2000/svg'><path fill='#fff' d='M0 1h2v2H0zM1 0h4v1H1zM4 1h2v2H4zM3 3h2v1H3zM2 4h2v2H2zM2 7h2v2H2z'/></svg>";
 
 // --- Window Style Constants ---
 export const WS_BORDER      = 0x00800000;
@@ -185,14 +189,16 @@ export function Window({
       </>}
       {/* Frame border */}
       <div style={{
-        background: '#D4D0C8', ...(clientW != null ? { width: `${clientW}px` } : {}), boxSizing: 'content-box',
+        background: '#ece9d8', ...(clientW != null ? { width: `${clientW}px` } : {}), boxSizing: 'content-box',
         ...(maximized ? {} :
           (wStyle & WS_THICKFRAME) ? {
             padding: '4px',
-            boxShadow: 'inset -1px -1px #0a0a0a, inset 1px 1px #dfdfdf, inset -2px -2px grey, inset 2px 2px #fff',
+            borderRadius: '7px 7px 0 0',
+            boxShadow: 'inset 1px 1px 0 #fff, inset -1px -1px 0 #7f9db9, 0 0 0 1px #0054e3',
           } : (wStyle & WS_DLGFRAME) ? {
             padding: '3px',
-            boxShadow: 'inset -1px -1px #0a0a0a, inset 1px 1px #dfdfdf, inset -2px -2px grey, inset 2px 2px #fff',
+            borderRadius: '7px 7px 0 0',
+            boxShadow: 'inset 1px 1px 0 #fff, inset -1px -1px 0 #7f9db9, 0 0 0 1px #0054e3',
           } : (wStyle & WS_BORDER) ? {
             padding: '1px',
             boxShadow: 'inset 0 0 0 1px #000',
@@ -203,10 +209,10 @@ export function Window({
           onPointerDown={handleDragTitleMouseDown}
           onDblClick={onTitleBarDblClick}
           style={{
-            background: effectiveFocused ? 'linear-gradient(to right, #0A246A, #3A6EA5)' : 'linear-gradient(to right, #808080, #B4B4B4)',
+            background: effectiveFocused ? 'linear-gradient(to bottom, #0a4fdd, #3d95ff)' : 'linear-gradient(to bottom, #7a96df, #9db9ed)',
             color: '#FFF', font: 'bold 12px/1 "Tahoma",sans-serif',
             padding: '2px 2px', display: 'flex', alignItems: 'center',
-            height: '20px', userSelect: 'none',
+            height: '24px', userSelect: 'none', borderRadius: maximized ? '0' : '5px 5px 0 0',
           }}>
           {iconUrl && (
             <img src={iconUrl} style={{
@@ -221,13 +227,13 @@ export function Window({
           </span>
           <span style={{ display: 'flex', gap: '0px', marginLeft: '2px', flexShrink: 0 }}>
             {hasHelp && !(wStyle & WS_MINIMIZEBOX) && !(wStyle & WS_MAXIMIZEBOX) && <>
-              {capBtnSvg(svgHelp, 'top 1px left 4px')}
+              {capBtnSvg(svgHelp, 'top 4px left 7px')}
               <span style={{ width: '2px' }} />
             </>}
-            {(wStyle & WS_MINIMIZEBOX) ? capBtnSvg(svgMin, 'top 7px left 4px', onMinimize) : null}
-            {(wStyle & WS_MAXIMIZEBOX) ? capBtnSvg(maximized ? svgRestore : svgMax, maximized ? 'top 0px left 2px' : 'top 1px left 2px', onMaximize) : null}
+            {(wStyle & WS_MINIMIZEBOX) ? capBtnSvg(svgMin, 'top 9px left 7px', onMinimize) : null}
+            {(wStyle & WS_MAXIMIZEBOX) ? capBtnSvg(maximized ? svgRestore : svgMax, maximized ? 'top 4px left 6px' : 'top 4px left 6px', onMaximize) : null}
             {((wStyle & WS_MINIMIZEBOX) || (wStyle & WS_MAXIMIZEBOX)) ? <span style={{ width: '2px' }} /> : null}
-            {(wStyle & WS_SYSMENU) ? capBtnSvg(svgClose, 'top 2px left 3px', onClose) : null}
+            {(wStyle & WS_SYSMENU) ? capBtnSvg(svgClose, 'top 5px left 7px', onClose, 'close') : null}
           </span>
         </div>}
 

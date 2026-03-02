@@ -263,7 +263,12 @@ export function App() {
   return (
     <div class="w-full h-screen" style={{ display: 'flex', flexDirection: 'column', cursor: loadingAppIds.size > 0 ? 'progress' : undefined }}>
       <div style={{ position: 'relative', flex: 1, overflow: 'hidden' }}>
-        <div style={{ position: 'absolute', inset: 0, overflow: 'auto', background: '#F0F0F0' }} onPointerDown={() => setFocusedAppId(null)}>
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          overflow: 'auto',
+          background: 'linear-gradient(180deg, #8ec8ff 0%, #6ab2f6 33%, #4f96e8 100%)',
+        }} onPointerDown={() => setFocusedAppId(null)}>
           <Desktop onRunExe={handleRunExe} onViewResources={handleViewResources} onOpenFolder={handleOpenFolder} />
         </div>
         {runningApps.map((app) => (
