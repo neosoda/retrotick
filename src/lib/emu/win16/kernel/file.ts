@@ -1,4 +1,5 @@
 import type { Emulator, Win16Module } from '../../emulator';
+import type { OpenFile } from '../../file-manager';
 import type { KernelState } from './index';
 
 export function registerKernelFile(kernel: Win16Module, emu: Emulator, state: KernelState): void {
@@ -28,31 +29,19 @@ export function registerKernelFile(kernel: Win16Module, emu: Emulator, state: Ke
       const ab = emu.additionalFiles.get(existing.name);
       if (ab) syncData = new Uint8Array(ab);
     }
-    const handle = emu.handles.alloc('file', {});
-    fs.openFile(handle, {
-      path: upper,
-      access,
-      pos: 0,
-      data: syncData,
-      size: existing.size,
-      modified: false,
-    });
-    return handle;
+    return emu.handles.alloc('file', {
+      path: upper, access, pos: 0,
+      data: syncData, size: existing.size, modified: false,
+    } satisfies OpenFile);
   }
 
   function createFileByPath(path: string): number {
     const resolved = emu.resolvePath(path);
     const upper = resolved.toUpperCase();
-    const handle = emu.handles.alloc('file', {});
-    fs.openFile(handle, {
-      path: upper,
-      access: 0x40000000, // GENERIC_WRITE
-      pos: 0,
-      data: new Uint8Array(0),
-      size: 0,
-      modified: true,
-    });
-    return handle;
+    return emu.handles.alloc('file', {
+      path: upper, access: 0x40000000, pos: 0,
+      data: new Uint8Array(0), size: 0, modified: true,
+    } satisfies OpenFile);
   }
 
   // --- Ordinal 85: _lopen(str word) — 6 bytes (str+word) ---
@@ -74,7 +63,7 @@ export function registerKernelFile(kernel: Win16Module, emu: Emulator, state: Ke
   // --- Ordinal 82: _lread(hFile, lpBuffer_segptr, wBytes) — 8 bytes (word+segptr+word) ---
   kernel.register('ord_82', 8, () => {
     const [hFile, lpBuffer, wBytes] = emu.readPascalArgs16([2, 4, 2]);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file || !file.data) return 0;
     const buf = emu.resolveFarPtr(lpBuffer);
     const avail = Math.min(wBytes, file.size - file.pos);
@@ -88,7 +77,7 @@ export function registerKernelFile(kernel: Win16Module, emu: Emulator, state: Ke
   // --- Ordinal 86: _lwrite(hFile, lpBuffer_ptr, wBytes) — 8 bytes (word+ptr+word) ---
   kernel.register('ord_86', 8, () => {
     const [hFile, lpBuffer, wBytes] = emu.readPascalArgs16([2, 4, 2]);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file) return 0;
     const buf = emu.resolveFarPtr(lpBuffer);
     const endPos = file.pos + wBytes;
@@ -109,15 +98,16 @@ export function registerKernelFile(kernel: Win16Module, emu: Emulator, state: Ke
   // --- Ordinal 81: _lclose(hFile) — 2 bytes (word) ---
   kernel.register('ord_81', 2, () => {
     const hFile = emu.readArg16(0);
-    fs.closeFile(hFile);
-    fs.deleteOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
+    if (file) fs.persistOnClose(file);
+    emu.handles.free(hFile);
     return 0;
   });
 
   // --- Ordinal 84: _llseek(word long word) — 8 bytes (word+long+word) ---
   kernel.register('ord_84', 8, () => {
     const [hFile, lOffset, iOrigin] = emu.readPascalArgs16([2, 4, 2]);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file) return HFILE_ERROR;
     // lOffset is signed
     const offset = (lOffset | 0);

@@ -1,4 +1,5 @@
 import type { Emulator } from '../../emulator';
+import type { OpenFile } from '../../file-manager';
 import { emuCompleteThunk } from '../../emu-exec';
 
 export function registerFile(emu: Emulator): void {
@@ -59,52 +60,35 @@ export function registerFile(emu: Emulator): void {
         const ab = emu.additionalFiles.get(existing.name);
         if (ab) syncData = new Uint8Array(ab);
       }
-      const handle = emu.handles.alloc('file', {});
-      fs.openFile(handle, {
-        path: upper,
-        access: dwDesiredAccess,
-        pos: 0,
-        data: syncData,
-        size: existing.size,
-        modified: false,
-      });
-      return handle;
+      return emu.handles.alloc('file', {
+        path: upper, access: dwDesiredAccess, pos: 0,
+        data: syncData, size: existing.size, modified: false,
+      } satisfies OpenFile);
     }
 
     if (dwCreationDisposition === OPEN_ALWAYS) {
       if (existing) {
-        const handle = emu.handles.alloc('file', {});
         const extData = existing.source === 'external' ? fs.externalFiles.get(upper)?.data ?? null : null;
-        fs.openFile(handle, {
-          path: upper,
-          access: dwDesiredAccess,
-          pos: 0,
-          data: extData,
-          size: existing.size,
-          modified: false,
-        });
-        return handle;
+        return emu.handles.alloc('file', {
+          path: upper, access: dwDesiredAccess, pos: 0,
+          data: extData, size: existing.size, modified: false,
+        } satisfies OpenFile);
       }
       if (upper.startsWith('D:\\')) {
         const storeName = resolved.substring(3).replace(/\\/g, '/');
-        const handle = emu.handles.alloc('file', {});
-        fs.openFile(handle, {
-          path: upper,
-          access: dwDesiredAccess,
-          pos: 0,
-          data: new Uint8Array(0),
-          size: 0,
-          modified: true,
-        });
         fs.virtualFiles.push({ name: storeName, size: 0 });
-        return handle;
+        return emu.handles.alloc('file', {
+          path: upper, access: dwDesiredAccess, pos: 0,
+          data: new Uint8Array(0), size: 0, modified: true,
+        } satisfies OpenFile);
       }
       if (upper.startsWith('Z:\\')) {
         const baseName = resolved.substring(3);
-        const handle = emu.handles.alloc('file', {});
-        fs.openFile(handle, { path: upper, access: dwDesiredAccess, pos: 0, data: new Uint8Array(0), size: 0, modified: true });
         fs.externalFiles.set(upper, { data: new Uint8Array(0), name: baseName });
-        return handle;
+        return emu.handles.alloc('file', {
+          path: upper, access: dwDesiredAccess, pos: 0,
+          data: new Uint8Array(0), size: 0, modified: true,
+        } satisfies OpenFile);
       }
       return INVALID_HANDLE_VALUE;
     }
@@ -113,42 +97,31 @@ export function registerFile(emu: Emulator): void {
       if (dwCreationDisposition === CREATE_NEW && existing) return INVALID_HANDLE_VALUE;
       if (upper.startsWith('D:\\')) {
         const storeName = resolved.substring(3).replace(/\\/g, '/');
-        const handle = emu.handles.alloc('file', {});
-        fs.openFile(handle, {
-          path: upper,
-          access: dwDesiredAccess,
-          pos: 0,
-          data: new Uint8Array(0),
-          size: 0,
-          modified: true,
-        });
         if (!existing) {
           fs.virtualFiles.push({ name: storeName, size: 0 });
         }
-        return handle;
+        return emu.handles.alloc('file', {
+          path: upper, access: dwDesiredAccess, pos: 0,
+          data: new Uint8Array(0), size: 0, modified: true,
+        } satisfies OpenFile);
       }
       if (upper.startsWith('Z:\\')) {
         const baseName = resolved.substring(3);
-        const handle = emu.handles.alloc('file', {});
-        fs.openFile(handle, { path: upper, access: dwDesiredAccess, pos: 0, data: new Uint8Array(0), size: 0, modified: true });
         fs.externalFiles.set(upper, { data: new Uint8Array(0), name: baseName });
-        return handle;
+        return emu.handles.alloc('file', {
+          path: upper, access: dwDesiredAccess, pos: 0,
+          data: new Uint8Array(0), size: 0, modified: true,
+        } satisfies OpenFile);
       }
       return INVALID_HANDLE_VALUE;
     }
 
     if (dwCreationDisposition === TRUNCATE_EXISTING) {
       if (!existing) return INVALID_HANDLE_VALUE;
-      const handle = emu.handles.alloc('file', {});
-      fs.openFile(handle, {
-        path: upper,
-        access: dwDesiredAccess,
-        pos: 0,
-        data: new Uint8Array(0),
-        size: 0,
-        modified: true,
-      });
-      return handle;
+      return emu.handles.alloc('file', {
+        path: upper, access: dwDesiredAccess, pos: 0,
+        data: new Uint8Array(0), size: 0, modified: true,
+      } satisfies OpenFile);
     }
 
     return INVALID_HANDLE_VALUE;
@@ -179,26 +152,24 @@ export function registerFile(emu: Emulator): void {
 
     const existing = fs.findFile(resolved, emu.additionalFiles);
 
+    console.log(`[OpenFile] file="${fileName}" resolved="${resolved}" style=0x${uStyle.toString(16)} found=${!!existing}`);
+
     if ((uStyle & OF_EXIST) !== 0) {
       return existing ? 0 : HFILE_ERROR;
     }
 
     if (existing) {
-      const handle = emu.handles.alloc('file', {});
       let fileData: Uint8Array | null = null;
-      if (existing.source === 'additional') {
+      if (existing.source === 'external') {
+        fileData = fs.externalFiles.get(upper)?.data ?? null;
+      } else if (existing.source === 'additional') {
         const ab = emu.additionalFiles.get(existing.name);
         if (ab) fileData = new Uint8Array(ab);
       }
-      fs.openFile(handle, {
-        path: upper,
-        access: GENERIC_READ,
-        pos: 0,
-        data: fileData,
-        size: existing.size,
-        modified: false,
-      });
-      return handle;
+      return emu.handles.alloc('file', {
+        path: upper, access: GENERIC_READ, pos: 0,
+        data: fileData, size: existing.size, modified: false,
+      } satisfies OpenFile);
     }
 
     return HFILE_ERROR;
@@ -212,22 +183,20 @@ export function registerFile(emu: Emulator): void {
     const resolved = emu.resolvePath(fileName);
     const upper = resolved.toUpperCase();
     const existing = fs.findFile(resolved, emu.additionalFiles);
+    console.log(`[_lopen] file="${fileName}" resolved="${resolved}" mode=${iReadWrite} found=${!!existing}`);
     if (!existing) return HFILE_ERROR;
-    const handle = emu.handles.alloc('file', {});
     let fileData: Uint8Array | null = null;
-    if (existing.source === 'additional') {
+    if (existing.source === 'external') {
+      fileData = fs.externalFiles.get(upper)?.data ?? null;
+    } else if (existing.source === 'additional') {
       const ab = emu.additionalFiles.get(existing.name);
       if (ab) fileData = new Uint8Array(ab);
     }
-    fs.openFile(handle, {
+    return emu.handles.alloc('file', {
       path: upper,
       access: iReadWrite === 0 ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE,
-      pos: 0,
-      data: fileData,
-      size: existing.size,
-      modified: false,
-    });
-    return handle;
+      pos: 0, data: fileData, size: existing.size, modified: false,
+    } satisfies OpenFile);
   });
 
   // _hread/_lread(hFile, lpBuffer, uBytes)
@@ -235,7 +204,7 @@ export function registerFile(emu: Emulator): void {
     const hFile = emu.readArg(0);
     const lpBuffer = emu.readArg(1);
     const uBytes = emu.readArg(2);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file || !file.data) return 0;
     const avail = Math.max(0, file.data.length - file.pos);
     const toRead = Math.min(uBytes, avail);
@@ -251,7 +220,8 @@ export function registerFile(emu: Emulator): void {
   // _lclose(hFile)
   kernel32.register('_lclose', 1, () => {
     const hFile = emu.readArg(0);
-    fs.deleteOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
+    if (file) fs.persistOnClose(file);
     emu.handles.free(hFile);
     return 0;
   });
@@ -261,7 +231,7 @@ export function registerFile(emu: Emulator): void {
     const hFile = emu.readArg(0);
     const lOffset = emu.readArg(1) | 0;
     const iOrigin = emu.readArg(2);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file) return HFILE_ERROR;
     if (iOrigin === FILE_BEGIN) file.pos = lOffset;
     else if (iOrigin === FILE_CURRENT) file.pos += lOffset;
@@ -298,8 +268,13 @@ export function registerFile(emu: Emulator): void {
       return 1;
     }
 
-    const file = fs.getOpenFile(hFile);
-    if (!file) return 0;
+    const file = emu.handles.get<OpenFile>(hFile);
+    if (!file) {
+      console.log(`[ReadFile] handle=0x${hFile.toString(16)} — not found`);
+      return 0;
+    }
+
+    console.log(`[ReadFile] handle=0x${hFile.toString(16)} path="${file.path}" pos=${file.pos} nBytes=${nBytes} dataLen=${file.data?.length ?? 'null'}`);
 
     if (file.data !== null) {
       const avail = Math.max(0, file.data.length - file.pos);
@@ -309,6 +284,7 @@ export function registerFile(emu: Emulator): void {
       }
       file.pos += toRead;
       if (bytesReadPtr) emu.memory.writeU32(bytesReadPtr, toRead);
+      console.log(`[ReadFile] read ${toRead} bytes, newPos=${file.pos}`);
       return 1;
     }
 
@@ -364,11 +340,14 @@ export function registerFile(emu: Emulator): void {
       return 1;
     }
 
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file) {
+      console.log(`[WriteFile] handle=0x${hFile.toString(16)} — not found`);
       if (writtenPtr) emu.memory.writeU32(writtenPtr, 0);
       return 0;
     }
+
+    console.log(`[WriteFile] handle=0x${hFile.toString(16)} path="${file.path}" pos=${file.pos} nBytes=${nBytes}`);
 
     if (file.data === null) file.data = new Uint8Array(0);
 
@@ -393,9 +372,17 @@ export function registerFile(emu: Emulator): void {
   // ---- CloseHandle ----
   kernel32.register('CloseHandle', 1, () => {
     const handle = emu.readArg(0);
-    if (fs.hasOpenFile(handle)) {
-      fs.closeFile(handle);
+    const type = emu.handles.getType(handle);
+    if (type === 'file') {
+      const file = emu.handles.get<OpenFile>(handle);
+      console.log(`[CloseHandle] handle=0x${handle.toString(16)} type=file path="${file?.path}" modified=${file?.modified}`);
+      if (file) fs.persistOnClose(file);
+    } else if (type) {
+      console.log(`[CloseHandle] handle=0x${handle.toString(16)} type=${type}`);
+    } else {
+      console.log(`[CloseHandle] handle=0x${handle.toString(16)} — unknown handle`);
     }
+    emu.handles.free(handle);
     return 1;
   });
 
@@ -403,7 +390,7 @@ export function registerFile(emu: Emulator): void {
   kernel32.register('GetFileType', 1, () => {
     const h = emu.readArg(0);
     if (isConsoleHandle(h)) return 2; // FILE_TYPE_CHAR
-    if (fs.hasOpenFile(h)) return 1; // FILE_TYPE_DISK
+    if (emu.handles.getType(h) === 'file') return 1; // FILE_TYPE_DISK
     return 0; // FILE_TYPE_UNKNOWN
   });
 
@@ -417,8 +404,11 @@ export function registerFile(emu: Emulator): void {
     const lpDistanceToMoveHigh = emu.readArg(2);
     const dwMoveMethod = emu.readArg(3);
 
-    const file = fs.getOpenFile(hFile);
-    if (!file) return INVALID_HANDLE_VALUE;
+    const file = emu.handles.get<OpenFile>(hFile);
+    if (!file) {
+      console.log(`[SetFilePointer] handle=0x${hFile.toString(16)} — not found`);
+      return INVALID_HANDLE_VALUE;
+    }
 
     let newPos: number;
     if (dwMoveMethod === FILE_BEGIN) {
@@ -432,6 +422,7 @@ export function registerFile(emu: Emulator): void {
     }
 
     if (newPos < 0) newPos = 0;
+    console.log(`[SetFilePointer] handle=0x${hFile.toString(16)} path="${file.path}" method=${dwMoveMethod} offset=${lDistanceToMove} newPos=${newPos}`);
     file.pos = newPos;
     if (lpDistanceToMoveHigh) emu.memory.writeU32(lpDistanceToMoveHigh, 0);
     return newPos >>> 0;
@@ -441,15 +432,19 @@ export function registerFile(emu: Emulator): void {
   kernel32.register('GetFileSize', 2, () => {
     const hFile = emu.readArg(0);
     const lpFileSizeHigh = emu.readArg(1);
-    const file = fs.getOpenFile(hFile);
-    if (!file) return INVALID_HANDLE_VALUE;
+    const file = emu.handles.get<OpenFile>(hFile);
+    if (!file) {
+      console.log(`[GetFileSize] handle=0x${hFile.toString(16)} — not found`);
+      return INVALID_HANDLE_VALUE;
+    }
+    console.log(`[GetFileSize] handle=0x${hFile.toString(16)} path="${file.path}" size=${file.size}`);
     if (lpFileSizeHigh) emu.memory.writeU32(lpFileSizeHigh, 0);
     return file.size >>> 0;
   });
 
   kernel32.register('SetEndOfFile', 1, () => {
     const hFile = emu.readArg(0);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (!file) return 0;
     if (file.data === null) file.data = new Uint8Array(0);
     if (file.pos < file.data.length) {
@@ -475,7 +470,7 @@ export function registerFile(emu: Emulator): void {
     const dwMaxSizeLow = emu.readArg(4);
     const size = dwMaxSizeLow || 0x10000;
     const addr = emu.allocHeap(size);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (file && file.data) {
       const copyLen = Math.min(file.data.length, size);
       for (let i = 0; i < copyLen; i++) emu.memory.writeU8(addr + i, file.data[i]);
@@ -490,7 +485,7 @@ export function registerFile(emu: Emulator): void {
     const dwMaxSizeLow = emu.readArg(4);
     const size = dwMaxSizeLow || 0x10000;
     const addr = emu.allocHeap(size);
-    const file = fs.getOpenFile(hFile);
+    const file = emu.handles.get<OpenFile>(hFile);
     if (file && file.data) {
       const copyLen = Math.min(file.data.length, size);
       for (let i = 0; i < copyLen; i++) emu.memory.writeU8(addr + i, file.data[i]);
@@ -516,6 +511,7 @@ export function registerFile(emu: Emulator): void {
     return 1;
   });
   kernel32.register('FileTimeToDosDateTime', 3, () => 1);
+  kernel32.register('DosDateTimeToFileTime', 3, () => 1);
 
   kernel32.register('LocalFileTimeToFileTime', 2, () => {
     const lpLocalFileTime = emu.readArg(0);
@@ -637,8 +633,10 @@ export function registerFile(emu: Emulator): void {
     const lpFileName = emu.readArg(0);
     const lpFindData = emu.readArg(1);
     if (!lpFileName) return INVALID_HANDLE_VALUE;
-    const pattern = emu.resolvePath(emu.memory.readCString(lpFileName));
+    const rawName = emu.memory.readCString(lpFileName);
+    const pattern = emu.resolvePath(rawName);
     const files = fs.getVirtualDirListing(pattern, emu.additionalFiles);
+    console.log(`[FindFirstFileA] pattern="${rawName}" resolved="${pattern}" found=${files.length} files`);
     if (files.length === 0) return INVALID_HANDLE_VALUE;
     writeFindDataA(lpFindData, files[0]);
     const handle = nextFindHandle++;
@@ -650,8 +648,10 @@ export function registerFile(emu: Emulator): void {
     const lpFileName = emu.readArg(0);
     const lpFindData = emu.readArg(1);
     if (!lpFileName) return INVALID_HANDLE_VALUE;
-    const pattern = emu.resolvePath(emu.memory.readUTF16String(lpFileName));
+    const rawName = emu.memory.readUTF16String(lpFileName);
+    const pattern = emu.resolvePath(rawName);
     const files = fs.getVirtualDirListing(pattern, emu.additionalFiles);
+    console.log(`[FindFirstFileW] pattern="${rawName}" resolved="${pattern}" found=${files.length} files`);
     if (files.length === 0) return INVALID_HANDLE_VALUE;
     writeFindDataW(lpFindData, files[0]);
     const handle = nextFindHandle++;
@@ -690,7 +690,9 @@ export function registerFile(emu: Emulator): void {
     if (!lpFileName) return 0;
     const rawPath = isWide ? emu.memory.readUTF16String(lpFileName) : emu.memory.readCString(lpFileName);
     const resolved = emu.resolvePath(rawPath);
-    return fs.deleteFile(resolved) ? 1 : 0;
+    const result = fs.deleteFile(resolved) ? 1 : 0;
+    console.log(`[DeleteFile] path="${rawPath}" resolved="${resolved}" result=${result}`);
+    return result;
   }
   kernel32.register('DeleteFileA', 1, () => doDeleteFile(false));
   kernel32.register('DeleteFileW', 1, () => doDeleteFile(true));
@@ -894,7 +896,9 @@ export function registerFile(emu: Emulator): void {
     const bufSize = emu.readArg(0);
     const bufPtr = emu.readArg(1);
     const path = emu.currentDirs.get(emu.currentDrive) || (emu.currentDrive + ':\\');
-    if (bufPtr) emu.memory.writeUTF16String(bufPtr, path);
+    if (bufPtr && bufSize > path.length) {
+      emu.memory.writeUTF16String(bufPtr, path);
+    }
     return path.length;
   });
 
@@ -1008,13 +1012,19 @@ export function registerFile(emu: Emulator): void {
   kernel32.register('GetFileAttributesW', 1, () => {
     const lpFileName = emu.readArg(0);
     if (!lpFileName) return INVALID_HANDLE_VALUE;
-    return fs.getFileAttributes(emu.memory.readUTF16String(lpFileName), emu.additionalFiles);
+    const name = emu.memory.readUTF16String(lpFileName);
+    const result = fs.getFileAttributes(name, emu.additionalFiles);
+    console.log(`[GetFileAttributesW] path="${name}" result=0x${result.toString(16)}`);
+    return result;
   });
 
   kernel32.register('GetFileAttributesA', 1, () => {
     const lpFileName = emu.readArg(0);
     if (!lpFileName) return INVALID_HANDLE_VALUE;
-    return fs.getFileAttributes(emu.memory.readCString(lpFileName), emu.additionalFiles);
+    const name = emu.memory.readCString(lpFileName);
+    const result = fs.getFileAttributes(name, emu.additionalFiles);
+    console.log(`[GetFileAttributesA] path="${name}" result=0x${result.toString(16)}`);
+    return result;
   });
 
   kernel32.register('SetFileAttributesA', 2, () => 1);
@@ -1061,7 +1071,7 @@ export function registerFile(emu: Emulator): void {
         requestAnimationFrame(emu.tick);
       }
     });
-    return 0;
+    return undefined;
   }
 
   kernel32.register('CopyFileA', 3, () => doCopyFile(false));
@@ -1106,7 +1116,7 @@ export function registerFile(emu: Emulator): void {
         requestAnimationFrame(emu.tick);
       }
     });
-    return 0;
+    return undefined;
   }
 
   kernel32.register('MoveFileA', 2, () => doMoveFile(false, false));
@@ -1162,4 +1172,33 @@ export function registerFile(emu: Emulator): void {
 
   // CopyFileExW(lpExistingFileName, lpNewFileName, lpProgressRoutine, lpData, pbCancel, dwCopyFlags) — 6 args
   kernel32.register('CopyFileExW', 6, () => 0); // fail
+
+  // GetVolumeInformationA(lpRootPathName, lpVolName, nVolNameSize, lpSerialNumber, lpMaxComponentLen, lpFlags, lpFSName, nFSNameSize) — 8 args
+  kernel32.register('GetVolumeInformationA', 8, () => {
+    const lpVolumeNameBuffer = emu.readArg(1);
+    const nVolumeNameSize = emu.readArg(2);
+    const lpSerialNumber = emu.readArg(3);
+    const lpMaxComponentLength = emu.readArg(4);
+    const lpFileSystemFlags = emu.readArg(5);
+    const lpFileSystemNameBuffer = emu.readArg(6);
+    const nFileSystemNameSize = emu.readArg(7);
+    if (lpVolumeNameBuffer && nVolumeNameSize > 0) emu.memory.writeCString(lpVolumeNameBuffer, 'LOCAL DISK');
+    if (lpSerialNumber) emu.memory.writeU32(lpSerialNumber, 0x1234ABCD);
+    if (lpMaxComponentLength) emu.memory.writeU32(lpMaxComponentLength, 255);
+    if (lpFileSystemFlags) emu.memory.writeU32(lpFileSystemFlags, 0x00000003);
+    if (lpFileSystemNameBuffer && nFileSystemNameSize > 0) emu.memory.writeCString(lpFileSystemNameBuffer, 'NTFS');
+    return 1;
+  });
+
+  // QueryDosDeviceA(lpDeviceName, lpTargetPath, ucchMax) — 3 args
+  kernel32.register('QueryDosDeviceA', 3, () => 0);
+
+  // DefineDosDeviceA(dwFlags, lpDeviceName, lpTargetPath) — 3 args
+  kernel32.register('DefineDosDeviceA', 3, () => 1);
+
+  // CreatePipe(hReadPipe, hWritePipe, lpPipeAttributes, nSize) — 4 args
+  kernel32.register('CreatePipe', 4, () => 0); // fail
+
+  // PeekNamedPipe(hNamedPipe, lpBuffer, nBufferSize, lpBytesRead, lpTotalBytesAvail, lpBytesLeftThisMessage) — 6 args
+  kernel32.register('PeekNamedPipe', 6, () => 0);
 }

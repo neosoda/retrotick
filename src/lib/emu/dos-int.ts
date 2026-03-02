@@ -1,6 +1,6 @@
 import type { CPU } from './x86/cpu';
 import type { Emulator } from './emulator';
-import type { DirEntry } from './file-manager';
+import type { DirEntry, OpenFile } from './file-manager';
 
 const EAX = 0, ECX = 1, EDX = 2, EBX = 3, ESP = 4, EBP = 5, ESI = 6, EDI = 7;
 const CF = 0x001;
@@ -623,7 +623,7 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
       const resolved = dosResolvePath(emu, name);
       const handle = emu._dosNextHandle++;
       const emptyData = new Uint8Array(0);
-      emu.fs.openFile(handle, { path: resolved, access: 0x40000000, pos: 0, data: emptyData, size: 0, modified: true });
+      emu.handles.set(handle, 'file', { path: resolved, access: 0x40000000, pos: 0, data: emptyData, size: 0, modified: true });
       emu._dosFiles.set(handle, { data: emptyData, pos: 0, name });
       cpu.setReg16(EAX, handle);
       cpu.setFlag(CF, false);
@@ -648,7 +648,7 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
         dataPromise.then((buf) => {
           const data = buf ? new Uint8Array(buf) : new Uint8Array(0);
           emu._dosFiles.set(handle, { data, pos: 0, name });
-          emu.fs.openFile(handle, { path: resolved, access: 0x80000000, pos: 0, data, size: data.length, modified: false });
+          emu.handles.set(handle, 'file', { path: resolved, access: 0x80000000, pos: 0, data, size: data.length, modified: false });
           cpu.setReg16(EAX, handle);
           cpu.setFlag(CF, false);
           if (emu._dosFileOpenPending) {
@@ -691,9 +691,9 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
     case 0x3E: { // Close file
       const h = cpu.getReg16(EBX);
       emu._dosFiles.delete(h);
-      if (emu.fs.hasOpenFile(h)) {
-        emu.fs.closeFile(h);
-      }
+      const of = emu.handles.get<OpenFile>(h);
+      if (of) emu.fs.persistOnClose(of);
+      emu.handles.free(h);
       cpu.setFlag(CF, false);
       break;
     }
@@ -735,7 +735,7 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
         else if (origin === 1) f.pos += offset;      // SEEK_CUR
         else if (origin === 2) f.pos = f.data.length + offset; // SEEK_END
         f.pos = Math.max(0, Math.min(f.pos, f.data.length));
-        const of = emu.fs.getOpenFile(h);
+        const of = emu.handles.get<OpenFile>(h);
         if (of) of.pos = f.pos;
         cpu.setReg16(EDX, (f.pos >>> 16) & 0xFFFF);
         cpu.setReg16(EAX, f.pos & 0xFFFF);
@@ -854,8 +854,8 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
             f.data[f.pos + i] = cpu.mem.readU8(bufAddr + i);
           }
           f.pos += count;
-          // Sync to emu.fs OpenFile
-          const of = emu.fs.getOpenFile(handle);
+          // Sync to handle table OpenFile
+          const of = emu.handles.get<OpenFile>(handle);
           if (of) {
             of.data = f.data;
             of.pos = f.pos;
@@ -880,7 +880,7 @@ function handleInt21(cpu: CPU, emu: Emulator): boolean {
         if (handle <= 4) {
           cpu.setReg16(EDX, 0x80D3); // character device, stdin/stdout/stderr/stdaux/stdprn
           cpu.setFlag(CF, false);
-        } else if (emu._dosFiles.has(handle) || emu.fs.hasOpenFile(handle)) {
+        } else if (emu._dosFiles.has(handle) || emu.handles.getType(handle) === 'file') {
           cpu.setReg16(EDX, 0x0000); // disk file (bit 7=0)
           cpu.setFlag(CF, false);
         } else {

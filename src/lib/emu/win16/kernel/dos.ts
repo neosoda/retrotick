@@ -1,4 +1,5 @@
 import type { Emulator, Win16Module } from '../../emulator';
+import type { OpenFile } from '../../file-manager';
 import type { KernelState } from './index';
 
 export function registerKernelDos(kernel: Win16Module, emu: Emulator, state: KernelState): void {
@@ -60,23 +61,23 @@ export function registerKernelDos(kernel: Win16Module, emu: Emulator, state: Ker
           const ab = emu.additionalFiles.get(existing.name);
           if (ab) syncData = new Uint8Array(ab);
         }
-        const handle = emu.handles.alloc('file', {});
-        fs.openFile(handle, { path: upper, access: emu.cpu.reg[0] & 0xFF, pos: 0, data: syncData, size: existing.size, modified: false });
+        const handle = emu.handles.alloc('file', { path: upper, access: emu.cpu.reg[0] & 0xFF, pos: 0, data: syncData, size: existing.size, modified: false } as OpenFile);
         emu.cpu.setFlags(emu.cpu.getFlags() & ~0x0001);
         emu.cpu.reg[0] = (emu.cpu.reg[0] & ~0xFFFF) | (handle & 0xFFFF);
       }
     } else if (ah === 0x3E) {
       // Close file
       const handle = emu.cpu.reg[3] & 0xFFFF; // BX = handle
-      fs.closeFile(handle);
-      fs.deleteOpenFile(handle);
+      const of = emu.handles.get<OpenFile>(handle);
+      if (of) fs.persistOnClose(of);
+      emu.handles.free(handle);
       emu.cpu.setFlags(emu.cpu.getFlags() & ~0x0001);
     } else if (ah === 0x3F) {
       // Read file: BX=handle, CX=count, DS:DX=buffer
       const handle = emu.cpu.reg[3] & 0xFFFF;
       const count = emu.cpu.reg[1] & 0xFFFF;
       const bufAddr = (emu.cpu.segBases.get(emu.cpu.ds) ?? 0) + (emu.cpu.reg[2] & 0xFFFF);
-      const file = fs.getOpenFile(handle);
+      const file = emu.handles.get<OpenFile>(handle);
       if (!file || !file.data) {
         emu.cpu.setFlags(emu.cpu.getFlags() | 0x0001);
         emu.cpu.reg[0] = (emu.cpu.reg[0] & ~0xFFFF) | 6;
@@ -94,7 +95,7 @@ export function registerKernelDos(kernel: Win16Module, emu: Emulator, state: Ker
       const handle = emu.cpu.reg[3] & 0xFFFF;
       const count = emu.cpu.reg[1] & 0xFFFF;
       const bufAddr = (emu.cpu.segBases.get(emu.cpu.ds) ?? 0) + (emu.cpu.reg[2] & 0xFFFF);
-      const file = fs.getOpenFile(handle);
+      const file = emu.handles.get<OpenFile>(handle);
       if (!file) {
         emu.cpu.setFlags(emu.cpu.getFlags() | 0x0001);
         emu.cpu.reg[0] = (emu.cpu.reg[0] & ~0xFFFF) | 6;
@@ -119,7 +120,7 @@ export function registerKernelDos(kernel: Win16Module, emu: Emulator, state: Ker
       const handle = emu.cpu.reg[3] & 0xFFFF;
       const offset = ((emu.cpu.reg[1] & 0xFFFF) << 16) | (emu.cpu.reg[2] & 0xFFFF);
       const origin = emu.cpu.reg[0] & 0xFF;
-      const file = fs.getOpenFile(handle);
+      const file = emu.handles.get<OpenFile>(handle);
       if (!file) {
         emu.cpu.setFlags(emu.cpu.getFlags() | 0x0001);
         emu.cpu.reg[0] = (emu.cpu.reg[0] & ~0xFFFF) | 6;

@@ -48,14 +48,8 @@ export interface FileManager {
   onFileDelete?: (fileName: string) => void;
   onFileSaveExternal?: (name: string, data: ArrayBuffer) => void;
 
-  // ---- Open file handle tracking ----
-  openFile(handle: number, file: OpenFile): void;
-  getOpenFile(handle: number): OpenFile | undefined;
-  hasOpenFile(handle: number): boolean;
-  deleteOpenFile(handle: number): void;
-
   /** Called when a modified file handle is closed — persists data */
-  closeFile(handle: number): void;
+  persistOnClose(file: OpenFile): void;
 
   // ---- Path operations ----
   resolvePath(input: string): string;
@@ -115,30 +109,7 @@ export class DefaultFileManager implements FileManager {
   onFileDelete?: (fileName: string) => void;
   onFileSaveExternal?: (name: string, data: ArrayBuffer) => void;
 
-  private openFiles = new Map<number, OpenFile>();
-
-  // ---- Open file handle tracking ----
-
-  openFile(handle: number, file: OpenFile): void {
-    this.openFiles.set(handle, file);
-  }
-
-  getOpenFile(handle: number): OpenFile | undefined {
-    return this.openFiles.get(handle);
-  }
-
-  hasOpenFile(handle: number): boolean {
-    return this.openFiles.has(handle);
-  }
-
-  deleteOpenFile(handle: number): void {
-    this.openFiles.delete(handle);
-  }
-
-  closeFile(handle: number): void {
-    const file = this.openFiles.get(handle);
-    if (!file) return;
-
+  persistOnClose(file: OpenFile): void {
     // If file was modified and on D:\, save back via callback
     if (file.modified && file.data && file.path.startsWith('D:\\') && this.onFileSave) {
       const relPath = file.path.substring(3);
@@ -157,8 +128,6 @@ export class DefaultFileManager implements FileManager {
         this.onFileSaveExternal(name, file.data.buffer.slice(file.data.byteOffset, file.data.byteOffset + file.data.byteLength) as ArrayBuffer);
       }
     }
-
-    this.openFiles.delete(handle);
   }
 
   // ---- Path operations ----

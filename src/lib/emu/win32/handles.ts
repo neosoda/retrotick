@@ -8,6 +8,11 @@ export class HandleTable {
     return h;
   }
 
+  /** Store with a specific handle value (for DOS handles etc.) */
+  set(handle: number, type: string, data: unknown): void {
+    this.handles.set(handle, { type, data });
+  }
+
   get<T>(handle: number): T | null {
     const entry = this.handles.get(handle);
     return entry ? entry.data as T : null;
